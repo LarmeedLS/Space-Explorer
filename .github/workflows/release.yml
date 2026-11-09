@@ -1,0 +1,288 @@
+name: Build and Publish Space-Explorer Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Rebuild or repair the release even if the tag already exists"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: space-explorer-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    name: Check Version & Decide Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      should_publish: ${{ steps.prepare.outputs.should_publish }}
+      reason: ${{ steps.prepare.outputs.reason }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inspect Cargo.toml Version & GitHub Releases
+        id: prepare
+        env:
+          FORCE_RELEASE: ${{ github.event.inputs.force_release }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Extract semver version from Cargo.toml
+          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -n1 | sed -E 's/version\s*=\s*"([^"]+)"/\1/')
+          TAG="v${VERSION}"
+          SHOULD_PUBLISH="false"
+          REASON=""
+
+          REQUIRED_ASSETS=(
+            "Space-Explorer-Linux-v${VERSION}.7z"
+            "Space-Explorer-Windows-v${VERSION}.7z"
+          )
+
+          echo "Detected project version: ${VERSION}"
+          echo "Expected release tag: ${TAG}"
+
+          TAG_EXISTS="false"
+          RELEASE_EXISTS="false"
+          RELEASE_HAS_REQUIRED_ASSETS="false"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            TAG_EXISTS="true"
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            RELEASE_EXISTS="true"
+          fi
+
+          if [[ "${RELEASE_EXISTS}" == "true" ]]; then
+            ASSET_NAMES="$(gh release view "${TAG}" --json assets --jq '.assets[].name' || true)"
+            echo "Assets currently present in ${TAG}:"
+            printf '%s\n' "${ASSET_NAMES:-none}"
+
+            missing=0
+            for required in "${REQUIRED_ASSETS[@]}"; do
+              if ! printf '%s\n' "${ASSET_NAMES}" | grep -Fxq "${required}"; then
+                echo "Missing expected asset: ${required}"
+                missing=$((missing + 1))
+              fi
+            done
+
+            if [[ "${missing}" -eq 0 ]]; then
+              RELEASE_HAS_REQUIRED_ASSETS="true"
+            fi
+          fi
+
+          if [[ "${TAG_EXISTS}" == "false" ]]; then
+            SHOULD_PUBLISH="true"
+            REASON="new version ${TAG}: tag will be created upon successful builds"
+          elif [[ "${FORCE_RELEASE:-false}" == "true" ]]; then
+            SHOULD_PUBLISH="true"
+            REASON="force_release requested: rebuilding assets for ${TAG}"
+          elif [[ "${RELEASE_EXISTS}" == "false" ]]; then
+            SHOULD_PUBLISH="true"
+            REASON="tag ${TAG} exists but GitHub release is missing"
+          elif [[ "${RELEASE_HAS_REQUIRED_ASSETS}" == "false" ]]; then
+            SHOULD_PUBLISH="true"
+            REASON="release ${TAG} exists but is missing required release archives"
+          else
+            SHOULD_PUBLISH="false"
+            REASON="tag ${TAG} and all release archives already exist"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+          echo "Decision: ${SHOULD_PUBLISH} (${REASON})"
+
+  no-release-needed:
+    name: No Release Needed
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_publish != 'true'
+    steps:
+      - name: Log Status
+        run: |
+          echo "No release generated."
+          echo "Reason: ${{ needs.prepare-release.outputs.reason }}"
+          echo "To publish a new release automatically, bump the version via './run.sh version patch' or './run.sh version minor' and push to main."
+
+  build-linux:
+    name: Build Linux Bundle (x86_64)
+    runs-on: ubuntu-22.04
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            p7zip-full \
+            libasound2-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libvulkan-dev \
+            vulkan-tools
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build generic release binary
+        run: |
+          # Generic x86_64 baseline (omitting -C target-cpu=native for universal compatibility)
+          RUSTFLAGS="" cargo build --release
+
+      - name: Assemble Linux release bundle
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          BUNDLE_DIR="Space-Explorer-Linux"
+          mkdir -p "${BUNDLE_DIR}"
+
+          cp -f "target/release/space_explorer" "${BUNDLE_DIR}/space_explorer"
+          chmod +x "${BUNDLE_DIR}/space_explorer"
+
+          mkdir -p "${BUNDLE_DIR}/assets"
+          cp -rf assets/* "${BUNDLE_DIR}/assets/"
+
+          # Standard high-efficiency 7-Zip LZMA2 solid compression
+          ARCHIVE_NAME="Space-Explorer-Linux-v${VERSION}.7z"
+          7z a -t7z -m0=lzma2 -mx=9 -mmt=on "${ARCHIVE_NAME}" "${BUNDLE_DIR}"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Space-Explorer-Linux-v${{ needs.prepare-release.outputs.version }}
+          path: Space-Explorer-Linux-v${{ needs.prepare-release.outputs.version }}.7z
+          if-no-files-found: error
+
+  build-windows:
+    name: Cross-Compile Windows Bundle (x86_64)
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install MinGW cross-compiler & 7-Zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full mingw-w64
+          # Configure MinGW to use the POSIX thread model (required for C++ std::thread and rustc x86_64-pc-windows-gnu)
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+      - name: Setup Rust toolchain for Windows
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Windows release binary
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_AR: x86_64-w64-mingw32-ar
+        run: |
+          cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Assemble Windows release bundle
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          BUNDLE_DIR="Space-Explorer-Windows"
+          mkdir -p "${BUNDLE_DIR}"
+
+          cp -f "target/x86_64-pc-windows-gnu/release/space_explorer.exe" "${BUNDLE_DIR}/space_explorer.exe"
+
+          mkdir -p "${BUNDLE_DIR}/assets"
+          cp -rf assets/* "${BUNDLE_DIR}/assets/"
+
+          # Bundle MinGW runtime DLLs required by Windows systems without MinGW
+          for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+            DLL_PATH=$(find /usr -name "${dll}" 2>/dev/null | grep -E 'x86_64|w64' | grep 'posix' | head -n1 || true)
+            if [[ -z "${DLL_PATH}" ]]; then
+              DLL_PATH=$(find /usr -name "${dll}" 2>/dev/null | grep -E 'x86_64|w64' | head -n1 || true)
+            fi
+            if [[ -n "${DLL_PATH}" && -f "${DLL_PATH}" ]]; then
+              echo "Bundling MinGW DLL: ${DLL_PATH}"
+              cp -f "${DLL_PATH}" "${BUNDLE_DIR}/"
+            else
+              echo "Warning: MinGW DLL ${dll} not found"
+            fi
+          done
+
+          # Standard high-efficiency 7-Zip LZMA2 solid compression
+          ARCHIVE_NAME="Space-Explorer-Windows-v${VERSION}.7z"
+          7z a -t7z -m0=lzma2 -mx=9 -mmt=on "${ARCHIVE_NAME}" "${BUNDLE_DIR}"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Space-Explorer-Windows-v${{ needs.prepare-release.outputs.version }}
+          path: Space-Explorer-Windows-v${{ needs.prepare-release.outputs.version }}.7z
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare-release, build-linux, build-windows]
+    if: needs.prepare-release.outputs.should_publish == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download Linux release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Space-Explorer-Linux-v${{ needs.prepare-release.outputs.version }}
+
+      - name: Download Windows release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Space-Explorer-Windows-v${{ needs.prepare-release.outputs.version }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
+          name: Space-Explorer ${{ needs.prepare-release.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            Space-Explorer-Linux-v${{ needs.prepare-release.outputs.version }}.7z
+            Space-Explorer-Windows-v${{ needs.prepare-release.outputs.version }}.7z
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

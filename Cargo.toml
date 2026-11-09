@@ -1,0 +1,22 @@
+[package]
+name = "space_explorer"
+version = "0.6.29"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.15", features = ["flac", "jpeg", "ktx2", "zstd", "basis-universal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bevy = { version = "0.15", features = ["wayland"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
