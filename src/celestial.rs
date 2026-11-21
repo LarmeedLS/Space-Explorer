@@ -311,6 +311,16 @@ pub struct AxialRotation {
     pub speed_rad_per_sec: f32,
 }
 
+/// High-precision f64 axial rotation state, lazily initialized on first tick.
+/// Accumulates spin angle in f64 and computes a normalized quaternion every frame,
+/// completely preventing f32 quaternion norm drift (which otherwise scales planetary meshes
+/// outward by tens to hundreds of meters over minutes at 165 Hz).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct AxialRotationState {
+    pub base_rotation: bevy::math::DQuat,
+    pub angle_rad: f64,
+}
+
 /// Multi-tier optical visor and canopy attenuation filter modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub enum CanopyVisorMode {
@@ -1537,7 +1547,10 @@ pub struct RelativisticOpticsBody {
 /// - Equator is in the XZ plane
 /// (Bevy's raw uv sphere has North pole at +Z; rotating by -90 deg around X aligns +Z to +Y)
 fn generate_planet_sphere_mesh(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
-    let mut mesh = Sphere::new(1.0).mesh().uv(256, 256);
+    let mut mesh = Sphere::new(1.0).mesh().uv(
+        crate::coords::UV_SPHERE_SUBDIVISIONS as u32,
+        crate::coords::UV_SPHERE_SUBDIVISIONS as u32,
+    );
     let rot = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
 
     if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(ref mut positions)) =
@@ -1679,6 +1692,7 @@ pub fn spawn_demo_celestial_system(
         perceptual_roughness: 0.50,
         metallic: 0.05,
         reflectance: 0.2,
+        cull_mode: None,
         ..default()
     });
 
@@ -2382,6 +2396,7 @@ pub fn spawn_realistic_solar_system(
         perceptual_roughness: 0.50,
         metallic: 0.05,
         reflectance: 0.2,
+        cull_mode: None, // Visible from both outside and inside
         ..default()
     });
     let earth_orbit = KeplerOrbit::circular(
@@ -2453,6 +2468,7 @@ pub fn spawn_realistic_solar_system(
         base_color_texture: Some(moon_texture.clone()),
         perceptual_roughness: 0.90,
         metallic: 0.0,
+        cull_mode: None, // Visible from both outside and inside
         ..default()
     });
     let luna_inc: f64 = 0.0898;
@@ -2510,6 +2526,7 @@ pub fn spawn_realistic_solar_system(
         base_color_texture: Some(mars_texture),
         perceptual_roughness: 0.85,
         metallic: 0.05,
+        cull_mode: None, // Visible from both outside and inside
         ..default()
     });
     let mars_inc: f64 = 0.03229;
@@ -4704,23 +4721,39 @@ fn generate_planetary_ring_mesh(
     meshes.add(mesh)
 }
 
-/// Updates celestial axial rotation on polar local Y-axis
+/// Updates celestial axial rotation on polar local Y-axis with exact f64 angle accumulation
+/// and strict quaternion normalization so planetary meshes never drift in radius over time.
 pub fn axial_rotation_system(
+    mut commands: Commands,
     time: Res<Time>,
     pause: Res<crate::flight::SimulationPause>,
     config: Res<crate::relativity::RelativisticConfig>,
-    mut query: Query<(&AxialRotation, &mut Transform)>,
+    mut query: Query<(Entity, &AxialRotation, &mut Transform, Option<&mut AxialRotationState>)>,
 ) {
     if pause.0 {
         return;
     }
-    let dt = time.delta_secs() * config.time_scale as f32;
+    let dt = time.delta_secs_f64() * config.time_scale;
     if dt == 0.0 {
         return;
     }
 
-    for (rot, mut transform) in query.iter_mut() {
-        transform.rotate_local_y(rot.speed_rad_per_sec * dt);
+    for (entity, rot, mut transform, state_opt) in query.iter_mut() {
+        let d_angle = (rot.speed_rad_per_sec as f64) * dt;
+        if let Some(mut state) = state_opt {
+            state.angle_rad = (state.angle_rad + d_angle).rem_euclid(std::f64::consts::TAU);
+            let exact_rot = (state.base_rotation * bevy::math::DQuat::from_rotation_y(state.angle_rad)).normalize();
+            transform.rotation = exact_rot.as_quat().normalize();
+        } else {
+            let base_rotation = transform.rotation.normalize().as_dquat();
+            let angle_rad = d_angle.rem_euclid(std::f64::consts::TAU);
+            let exact_rot = (base_rotation * bevy::math::DQuat::from_rotation_y(angle_rad)).normalize();
+            transform.rotation = exact_rot.as_quat().normalize();
+            commands.entity(entity).insert(AxialRotationState {
+                base_rotation,
+                angle_rad,
+            });
+        }
     }
 }
 
@@ -6276,5 +6309,39 @@ mod tests {
         assert_eq!(mat.emissive, LinearRgba::BLACK, "Receding planetary atmosphere must not have incandescent blueshift emissive");
         // Under redshift, reflectance is attenuated (less than rest 0.5)
         assert!(mat.reflectance < 0.5, "Receding planetary atmosphere reflectance must be dimmed (redshifted)");
+    }
+
+    #[test]
+    fn test_axial_rotation_zero_quaternion_norm_drift_at_165hz() {
+        let mut app = App::new();
+        app.insert_resource(crate::flight::SimulationPause(false));
+        app.insert_resource(crate::relativity::RelativisticConfig::default());
+        app.init_resource::<Time>();
+
+        let earth_ent = app.world_mut().spawn((
+            AxialRotation {
+                speed_rad_per_sec: 7.2921e-5, // Earth sidereal day
+            },
+            Transform::from_rotation(Quat::from_rotation_z(23.44_f32.to_radians())),
+        )).id();
+
+        app.add_systems(Update, axial_rotation_system);
+
+        // Simulate 40,000 frames (~4 minutes at 165 Hz)
+        let frame_dt = std::time::Duration::from_micros(6061);
+        for _ in 0..40_000 {
+            app.world_mut().resource_mut::<Time>().advance_by(frame_dt);
+            app.update();
+        }
+
+        let tf = app.world().get::<Transform>(earth_ent).unwrap();
+        let len_sq = tf.rotation.length_squared() as f64;
+        let radial_scale_err_m = (len_sq - 1.0).abs() * 6_371_000.0;
+        assert!(
+            radial_scale_err_m < 2.0,
+            "Earth quaternion norm must stay strictly unit-length over 40,000 frames at 165 Hz (radial error = {:.3} m, |q|^2 = {:.10})",
+            radial_scale_err_m,
+            len_sq
+        );
     }
 }

@@ -148,6 +148,9 @@ fn vertex(in: StarVertexInput) -> StarVertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
     let world_pos = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local_pos, 1.0));
     out.clip_position = position_world_to_clip(world_pos.xyz);
+    // Pin starfield depth to the absolute infinite far plane (Z = 0.0 in Reversed-Z depth buffer)
+    // so all physical 1:1 celestial bodies (even at 100 AU) strictly occlude background stars.
+    out.clip_position.z = 0.0;
 
     // Relativistic Doppler shift, thermal blackbody radiation & relativistic beaming
     var shifted_col = in.color.rgb;

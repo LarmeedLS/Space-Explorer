@@ -273,6 +273,42 @@ jobs:
         with:
           name: Space-Explorer-Windows-v${{ needs.prepare-release.outputs.version }}
 
+      - name: Extract Release Notes from CHANGELOG.md
+        id: changelog
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare-release.outputs.tag }}"
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          python3 - "${TAG}" "${VERSION}" <<'PY'
+          import re, sys
+          from pathlib import Path
+
+          tag, ver = sys.argv[1], sys.argv[2]
+          cl = Path("CHANGELOG.md")
+          out = Path("release_notes.md")
+          notes = ""
+          if cl.exists():
+              text = cl.read_text(encoding="utf-8")
+              pattern = re.compile(
+                  rf'^##\s+\[?v?{re.escape(ver)}\]?[^\n]*\n(.*?)(?=^##\s+|\Z)',
+                  re.M | re.S,
+              )
+              m = pattern.search(text)
+              if m:
+                  notes = m.group(1).strip()
+          if notes:
+              out.write_text(notes + "\n", encoding="utf-8")
+              print(f"Extracted {len(notes)} chars of release notes for {tag} from CHANGELOG.md")
+          else:
+              out.write_text("", encoding="utf-8")
+              print(f"No CHANGELOG.md section found for {tag}; falling back to auto-generated release notes.")
+          PY
+          if [[ -s release_notes.md ]]; then
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -280,7 +316,8 @@ jobs:
           name: Space-Explorer ${{ needs.prepare-release.outputs.tag }}
           draft: false
           prerelease: false
-          generate_release_notes: true
+          body_path: ${{ steps.changelog.outputs.has_notes == 'true' && 'release_notes.md' || '' }}
+          generate_release_notes: ${{ steps.changelog.outputs.has_notes != 'true' }}
           files: |
             Space-Explorer-Linux-v${{ needs.prepare-release.outputs.version }}.7z
             Space-Explorer-Windows-v${{ needs.prepare-release.outputs.version }}.7z

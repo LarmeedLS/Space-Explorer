@@ -31,6 +31,28 @@ pub fn pause_toggle_system(
     }
 }
 
+/// Advances simulation time across coordinate and proper time frames in strict synchrony
+/// with celestial orbital mechanics and axial rotation. Runs at the very start of the
+/// update chain so all systems (planets, moons, shuttle, targeting) evaluate at the exact
+/// same timestamp, eliminating any 1-frame orbital jump when pausing or unpausing.
+pub fn shuttle_time_system(
+    time: Res<Time>,
+    pause: Res<SimulationPause>,
+    config: Res<RelativisticConfig>,
+    mut query: Query<&mut RelativisticState, With<Shuttle>>,
+) {
+    if pause.0 {
+        return;
+    }
+    let dt_frame = time.delta_secs() as f64;
+    let d_tau = dt_frame * config.time_scale;
+    for mut rel_state in query.iter_mut() {
+        rel_state.proper_time += d_tau;
+        let dt_coordinate = rel_state.gamma * d_tau;
+        rel_state.coordinate_time += dt_coordinate;
+    }
+}
+
 #[derive(Resource)]
 pub struct FpsTracker {
     pub smoothed_fps: f64,
@@ -153,10 +175,16 @@ pub enum AutopilotPhase {
     Arrived,
 }
 
+/// Ground contact elevation offset for the Federal Corvette airframe:
+/// The 3D model spans 27.9m in height, with landing skids positioned 13.95m below the center.
+pub const SHUTTLE_BELLY_CLEARANCE: f64 = 13.95;
+
 #[derive(Component)]
 pub struct Shuttle {
     pub angular_velocity: Vec3,
     pub prev_rotation: Quat,
+    /// Mouse rotation buffer for physical rate-limiting in slow motion
+    pub mouse_accum: Vec2,
     pub smoothed_angular_speed_deg: f32,
     pub current_proper_accel: f64,
     pub current_grav_accel: f64,
@@ -208,6 +236,7 @@ impl Default for Shuttle {
         Self {
             angular_velocity: Vec3::ZERO,
             prev_rotation: Quat::IDENTITY,
+            mouse_accum: Vec2::ZERO,
             smoothed_angular_speed_deg: 0.0,
             current_proper_accel: 0.0,
             current_grav_accel: 0.0,
@@ -464,10 +493,10 @@ pub fn shuttle_input_system(
     if ctrl_pressed && scroll_delta.abs() > 0.0 {
         sens_change += scroll_delta * 0.15;
     }
-    if keyboard.just_pressed(KeyCode::NumpadAdd) || keyboard.just_pressed(KeyCode::Equal) || keyboard.just_pressed(KeyCode::BracketRight) {
+    if keyboard.just_pressed(KeyCode::NumpadAdd) || keyboard.just_pressed(KeyCode::Equal) {
         sens_change += 0.20; // +20%
     }
-    if keyboard.just_pressed(KeyCode::NumpadSubtract) || keyboard.just_pressed(KeyCode::Minus) || keyboard.just_pressed(KeyCode::BracketLeft) {
+    if keyboard.just_pressed(KeyCode::NumpadSubtract) || keyboard.just_pressed(KeyCode::Minus) {
         sens_change -= 0.20; // -20%
     }
 
@@ -573,6 +602,9 @@ pub fn shuttle_input_system(
         cam.rear_view_active = numpad_look_back;
     }
 
+    // Real wall-clock frame delta for camera viewport controls (unaffected by simulation slow-motion/warp)
+    let dt_real = time.delta_secs().min(0.05);
+
     let numpad_active = numpad_pitch_dir != 0.0 || numpad_yaw_dir != 0.0;
     if numpad_active {
         let len = (numpad_pitch_dir * numpad_pitch_dir + numpad_yaw_dir * numpad_yaw_dir).sqrt();
@@ -582,8 +614,8 @@ pub fn shuttle_input_system(
 
         for mut cam in camera_query.iter_mut() {
             cam.free_look_active = true;
-            cam.target_look_yaw += norm_yaw * numpad_pan_speed * dt_f32;
-            cam.target_look_pitch = (cam.target_look_pitch + norm_pitch * numpad_pan_speed * dt_f32).clamp(-1.30, 1.30);
+            cam.target_look_yaw += norm_yaw * numpad_pan_speed * dt_real;
+            cam.target_look_pitch = (cam.target_look_pitch + norm_pitch * numpad_pan_speed * dt_real).clamp(-1.30, 1.30);
         }
     }
 
@@ -602,13 +634,25 @@ pub fn shuttle_input_system(
     let orbit_sens = shuttle_sens;
 
     if is_free_look || numpad_active {
+        let is_landed = query.iter().next().map_or(false, |(s, _, _, _)| s.landed_body.is_some());
         for mut cam in camera_query.iter_mut() {
             cam.target_look_yaw -= mouse_delta.x * orbit_sens;
-            cam.target_look_pitch = (cam.target_look_pitch - mouse_delta.y * orbit_sens).clamp(-1.30, 1.30);
+            let pitch_max = if is_landed {
+                let dy = cam.chase_height - 0.5;
+                let dz = cam.chase_distance;
+                let pitch_down = dy.atan2(dz);
+                let r_chase = (dy * dy + dz * dz).sqrt();
+                let min_elevation = (-8.5f32 + cam.chase_distance * 0.01).min(0.0);
+                let safe_val = ((min_elevation - 0.5) / r_chase).clamp(-1.0, 1.0);
+                pitch_down - safe_val.asin()
+            } else {
+                1.30
+            };
+            cam.target_look_pitch = (cam.target_look_pitch - mouse_delta.y * orbit_sens).clamp(-1.30, pitch_max);
         }
     } else {
         for mut cam in camera_query.iter_mut() {
-            let decay = (-12.0 * dt_f32).exp();
+            let decay = (-12.0 * dt_real).exp();
             cam.target_look_yaw *= decay;
             cam.target_look_pitch *= decay;
             if cam.target_look_yaw.abs() < 0.0001 {
@@ -622,10 +666,34 @@ pub fn shuttle_input_system(
 
     // 4. If PAUSED: Freeze entire spaceship completely! No rotation, no movement, no physics!
     if pause.0 {
-        for (mut shuttle, _, _, mut transform) in query.iter_mut() {
+        for (mut shuttle, _rel_state, mut upos, mut transform) in query.iter_mut() {
             transform.translation = Vec3::ZERO;
             shuttle.smoothed_angular_speed_deg = 0.0;
             shuttle.prev_rotation = transform.rotation;
+
+            // If resting / landed on a celestial body, solidly maintain surface lock even while paused
+            if let Some(landed_ent) = shuttle.landed_body {
+                for (b_ent, b_upos, b_body, _b_vel_opt, _b_rot_opt, b_tf_opt, b_ellipsoid_opt) in celestial_query.iter() {
+                    if b_ent == landed_ent {
+                        let effective_r = if let (Some(ellipsoid), Some(_b_tf)) = (b_ellipsoid_opt, b_tf_opt) {
+                            ellipsoid.surface_radius_in_local_dir(shuttle.landed_local_normal)
+                        } else {
+                            b_body.physical_radius
+                        };
+
+                        let body_rot = b_tf_opt.map(|tf| tf.rotation.as_dquat()).unwrap_or(DQuat::IDENTITY);
+                        let world_normal = if shuttle.landed_local_normal.length_squared() > 0.5 {
+                            (body_rot * shuttle.landed_local_normal).normalize()
+                        } else {
+                            let rel = upos.0 - b_upos.0;
+                            if rel.length_squared() > 1e-6 { rel.normalize() } else { DVec3::Y }
+                        };
+
+                        upos.0 = b_upos.0 + world_normal * effective_r;
+                        break;
+                    }
+                }
+            }
         }
         return;
     }
@@ -1367,12 +1435,15 @@ pub fn shuttle_input_system(
         }
 
         // --- ROTATIONAL / ATTITUDE INPUTS ---
+        let is_landed = shuttle.landed_body.is_some();
         let (mouse_pitch, mouse_yaw) = if is_free_look {
             (0.0f32, 0.0f32)
+        } else if is_landed {
+            (0.0f32, -mouse_delta.x * shuttle.mouse_sensitivity.x)
         } else {
             (
-                -mouse_delta.y * shuttle.mouse_sensitivity.y * sim_time_factor,
-                -mouse_delta.x * shuttle.mouse_sensitivity.x * sim_time_factor,
+                -mouse_delta.y * shuttle.mouse_sensitivity.y,
+                -mouse_delta.x * shuttle.mouse_sensitivity.x,
             )
         };
 
@@ -1381,11 +1452,13 @@ pub fn shuttle_input_system(
         let mut key_roll = 0.0f32;
 
         if !in_autonomous_flight {
-            if keyboard.pressed(KeyCode::ArrowUp) {
-                key_pitch += 1.8;
-            }
-            if keyboard.pressed(KeyCode::ArrowDown) {
-                key_pitch -= 1.8;
+            if !is_landed {
+                if keyboard.pressed(KeyCode::ArrowUp) {
+                    key_pitch += 1.8;
+                }
+                if keyboard.pressed(KeyCode::ArrowDown) {
+                    key_pitch -= 1.8;
+                }
             }
             if keyboard.pressed(KeyCode::ArrowLeft) {
                 key_yaw += 1.8;
@@ -1393,12 +1466,20 @@ pub fn shuttle_input_system(
             if keyboard.pressed(KeyCode::ArrowRight) {
                 key_yaw -= 1.8;
             }
-            if keyboard.pressed(KeyCode::KeyQ) { // Physical 'A' on AZERTY
-                key_roll += 2.8;
+            if !is_landed {
+                if keyboard.pressed(KeyCode::KeyQ) { // Physical 'A' on AZERTY
+                    key_roll += 2.8;
+                }
+                if keyboard.pressed(KeyCode::KeyE) { // Physical 'E' on AZERTY
+                    key_roll -= 2.8;
+                }
             }
-            if keyboard.pressed(KeyCode::KeyE) { // Physical 'E' on AZERTY
-                key_roll -= 2.8;
-            }
+        }
+
+        if is_landed {
+            shuttle.angular_velocity.x = 0.0;
+            shuttle.angular_velocity.z = 0.0;
+            shuttle.mouse_accum.x = 0.0;
         }
 
         // --- ANGULAR DYNAMICS (100% Frame-Rate Independent) ---
@@ -1532,46 +1613,62 @@ pub fn shuttle_input_system(
             }
         } else if shuttle.flight_assist {
             // Rotational SAS:
-            // 1. Mouse movement directly and cleanly turns the ship orientation (1:1 with hardware pixels)
-            if mouse_yaw != 0.0 || mouse_pitch != 0.0 {
-                let rot_yaw = Quat::from_rotation_y(mouse_yaw);
-                let rot_pitch = Quat::from_rotation_x(mouse_pitch);
-                transform.rotation = (transform.rotation * rot_yaw * rot_pitch).normalize();
+            // 1. Keyboard angular velocity damping:
+            // When arrow keys or roll keys are pressed, angular velocity accelerates towards key input.
+            // When keys are released, angular velocity decelerates monotonically via exponential decay (ZERO rebound / bounce-back).
+            let has_key_rot = key_pitch != 0.0 || key_yaw != 0.0 || key_roll != 0.0;
+            if has_key_rot {
+                let damp_rate = 6.0f32;
+                let decay = (-damp_rate * dt_f32).exp();
+
+                shuttle.angular_velocity.x = key_pitch + (shuttle.angular_velocity.x - key_pitch) * decay;
+                shuttle.angular_velocity.y = key_yaw + (shuttle.angular_velocity.y - key_yaw) * decay;
+                shuttle.angular_velocity.z = key_roll + (shuttle.angular_velocity.z - key_roll) * decay;
+            } else {
+                let damp_rate = 8.0f32;
+                let decay = (-damp_rate * dt_f32).exp();
+                shuttle.angular_velocity *= decay;
+                if shuttle.angular_velocity.length() < 0.002 {
+                    shuttle.angular_velocity = Vec3::ZERO;
+                }
             }
 
-            // 2. Keyboard inputs (Arrow keys & Roll) drive angular velocity with smooth SAS damping
-            let damp_rate = 6.0f32;
-            let decay = (-damp_rate * dt_f32).exp();
-
-            // Pitch & Yaw from keyboard smoothly approach target rate or decelerate to 0
-            shuttle.angular_velocity.x = key_pitch + (shuttle.angular_velocity.x - key_pitch) * decay;
-            shuttle.angular_velocity.y = key_yaw + (shuttle.angular_velocity.y - key_yaw) * decay;
-            shuttle.angular_velocity.z = key_roll + (shuttle.angular_velocity.z - key_roll) * decay;
-
-            // Zero small velocities to prevent micro-drift
-            if key_pitch == 0.0 && shuttle.angular_velocity.x.abs() < 0.003 {
-                shuttle.angular_velocity.x = 0.0;
-            }
-            if key_yaw == 0.0 && shuttle.angular_velocity.y.abs() < 0.003 {
-                shuttle.angular_velocity.y = 0.0;
-            }
-            if key_roll == 0.0 && shuttle.angular_velocity.z.abs() < 0.003 {
-                shuttle.angular_velocity.z = 0.0;
-            }
-
-            // Apply exact physical axis-angle rotation integration
+            // Apply exact physical axis-angle rotation integration from keyboard angular velocity
             let ang_speed = shuttle.angular_velocity.length();
-            if ang_speed > 1e-6 {
+            if ang_speed > 1e-6 && dt_f32 > 0.0 {
                 let axis = shuttle.angular_velocity / ang_speed;
                 let delta_rot = Quat::from_axis_angle(axis, ang_speed * dt_f32);
                 transform.rotation = (transform.rotation * delta_rot).normalize();
             }
+
+            // 2. Mouse input buffering: physical rate-limiting strictly governed by simulation dt_f32.
+            // Prevents bypassing slow motion with high-speed mouse flicks, and smoothly consumes
+            // rotation forward without any overshoot or reversal.
+            if mouse_pitch != 0.0 || mouse_yaw != 0.0 {
+                shuttle.mouse_accum.x += mouse_pitch;
+                shuttle.mouse_accum.y += mouse_yaw;
+                shuttle.mouse_accum = shuttle.mouse_accum.clamp_length_max(45.0f32.to_radians());
+            }
+
+            let accum_len = shuttle.mouse_accum.length();
+            if accum_len > 1e-5 && dt_f32 > 0.0 {
+                let max_mouse_turn_rate = 2.5f32; // rad/s (~143 deg/s)
+                let max_step = max_mouse_turn_rate * dt_f32;
+                let step_len = accum_len.min(max_step);
+                let dir = shuttle.mouse_accum / accum_len;
+                let step = dir * step_len;
+                shuttle.mouse_accum -= step;
+
+                let rot_yaw = Quat::from_rotation_y(step.y);
+                let rot_pitch = Quat::from_rotation_x(step.x);
+                transform.rotation = (transform.rotation * rot_yaw * rot_pitch).normalize();
+            }
         } else {
             // RAW SAS OFF: Newtonian rotational inertia (tumbling)
-            // Mouse imparts rotational impulse (radians/sec)
-            let impulse_scale = 35.0f32;
-            shuttle.angular_velocity.x += mouse_pitch * impulse_scale;
-            shuttle.angular_velocity.y += mouse_yaw * impulse_scale;
+            // Mouse imparts rotational torque acceleration (scaled by dt_f32)
+            let mouse_accel_scale = 35.0f32;
+            shuttle.angular_velocity.x += mouse_pitch * mouse_accel_scale * (dt_f32 * 60.0).min(1.0);
+            shuttle.angular_velocity.y += mouse_yaw * mouse_accel_scale * (dt_f32 * 60.0).min(1.0);
 
             // Keyboard imparts continuous acceleration
             shuttle.angular_velocity.x += key_pitch * 2.5 * dt_f32;
@@ -1656,14 +1753,21 @@ pub fn shuttle_input_system(
         thrust_dir += local_up * (vertical_input as f64);
 
         // Check active user thrust input (forward/reverse, vertical, strafe)
+        let was_landed = shuttle.landed_body.is_some();
         let user_active_thrust = forward_input.abs() > 0.01 || strafe_input.abs() > 0.01 || vertical_input > 0.01;
         if user_active_thrust {
             shuttle.landed_body = None;
         }
 
-        // When resting near or on a celestial body, Space (vertical thruster) directly pushes upward along surface normal
-        if vertical_input > 0.0 {
+        // When resting near or on a celestial body:
+        // - Space (vertical thruster) directly pushes upward along surface normal.
+        // - W (forward thruster) when launching from the surface adds a gentle VTOL takeoff lift
+        //   along the surface normal so either Space or W lifts off cleanly without requiring Shift.
+        if vertical_input > 0.0 || (forward_input > 0.0 && was_landed) || forward_input > 0.0 {
             for (_, b_upos, b_body, _, _, b_tf_opt, b_ellipsoid_opt) in celestial_query.iter() {
+                if b_body.physical_radius <= 0.0 {
+                    continue;
+                }
                 let rel = upos.0 - b_upos.0;
                 let d = rel.length();
                 let effective_r = if let (Some(ellipsoid), Some(b_tf)) = (b_ellipsoid_opt, b_tf_opt) {
@@ -1673,9 +1777,13 @@ pub fn shuttle_input_system(
                 } else {
                     b_body.physical_radius
                 };
-                if d <= effective_r + 50.0 {
+                if vertical_input > 0.0 && d <= effective_r + 50.0 {
                     let normal = if d > 0.001 { rel / d } else { DVec3::Y };
                     thrust_dir += normal * (vertical_input as f64 * 2.0);
+                    break;
+                } else if forward_input > 0.0 && (was_landed || d <= effective_r + 5.0) {
+                    let normal = if d > 0.001 { rel / d } else { DVec3::Y };
+                    thrust_dir += normal * (forward_input as f64 * 0.75);
                     break;
                 }
             }
@@ -1749,10 +1857,8 @@ pub fn shuttle_input_system(
             rel_state.rapidity = crate::relativity::rapidity_from_velocity(new_v_shuttle, config.c);
         }
 
-        // Dual Spacetime Integration: dτ (ship) and dt = γ * dτ (universe)
-        rel_state.proper_time += d_tau;
+        // Dual Spacetime Integration: dt = γ * dτ (universe coordinate frame)
         let dt_coordinate = rel_state.gamma * d_tau;
-        rel_state.coordinate_time += dt_coordinate;
 
         // --- RELATIVISTIC PSEUDO-NEWTONIAN GRAVITY (Paczyński–Wiita) ---
         let mut total_grav_accel = DVec3::ZERO;
@@ -1805,6 +1911,7 @@ pub fn shuttle_input_system(
                         let dtheta = rot.speed_rad_per_sec as f64 * dt_coordinate;
                         let rot_quat = Quat::from_axis_angle(polar_axis.as_vec3(), dtheta as f32);
                         transform.rotation = rot_quat * transform.rotation;
+                        transform.rotation = align_shuttle_to_surface(transform.rotation, world_normal.as_vec3());
 
                         let tangential_v = polar_axis.cross(world_normal * effective_r) * rot.speed_rad_per_sec as f64;
                         let surface_vel = b_vel + tangential_v;
@@ -1813,7 +1920,7 @@ pub fn shuttle_input_system(
                         rel_state.update_from_rapidity(config.c);
                     } else {
                         let body_rot = b_tf_opt.map(|tf| tf.rotation.as_dquat()).unwrap_or(DQuat::IDENTITY);
-                        let world_normal = if shuttle.landed_local_normal.length_squared() > 0.5 && shuttle.landed_local_normal != DVec3::Y {
+                        let world_normal = if shuttle.landed_local_normal.length_squared() > 0.5 {
                             (body_rot * shuttle.landed_local_normal).normalize()
                         } else {
                             let rel = upos.0 - b_upos.0;
@@ -1823,11 +1930,13 @@ pub fn shuttle_input_system(
                         rel_state.velocity = b_vel;
                         rel_state.rapidity = crate::relativity::rapidity_from_velocity(b_vel, config.c);
                         rel_state.update_from_rapidity(config.c);
+                        transform.rotation = align_shuttle_to_surface(transform.rotation, world_normal.as_vec3());
                     }
 
                     shuttle.current_grav_accel = 0.0;
                     shuttle.current_proper_accel = 0.0;
-                    shuttle.angular_velocity = Vec3::ZERO;
+                    shuttle.angular_velocity.x = 0.0;
+                    shuttle.angular_velocity.z = 0.0;
                     break;
                 }
             }
@@ -1869,8 +1978,17 @@ pub fn shuttle_input_system(
                 let v_normal = v_rel.dot(normal);
                 let v_tangent = v_rel - normal * v_normal;
 
-                // Clamp shuttle position exactly to surface
-                upos.0 = body_upos.0 + normal * effective_surface_r;
+                // If actively climbing away from the surface (e.g. lifting off with Space or W at 165 Hz),
+                // do NOT slam the shuttle back down to effective_surface_r — allow smooth immediate liftoff!
+                if dist >= effective_surface_r && (v_normal > 0.05 || (user_active_thrust && v_normal > 0.0)) {
+                    shuttle.landed_body = None;
+                    continue;
+                }
+
+                // Clamp shuttle position to surface if penetrating or landing/resting
+                if dist < effective_surface_r || !user_active_thrust {
+                    upos.0 = body_upos.0 + normal * effective_surface_r;
+                }
 
                 if v_normal < 0.0 {
                     let impact_speed = -v_normal;
@@ -1898,11 +2016,12 @@ pub fn shuttle_input_system(
                             let body_rot = b_tf_opt.map(|tf| tf.rotation.as_dquat()).unwrap_or(DQuat::IDENTITY);
                             shuttle.landed_body = Some(body_ent);
                             shuttle.landed_local_normal = (body_rot.inverse() * normal).normalize();
+                            transform.rotation = align_shuttle_to_surface(transform.rotation, normal.as_vec3());
+                            shuttle.angular_velocity = Vec3::ZERO;
                         }
                         rel_state.velocity = surface_vel;
                         rel_state.rapidity = crate::relativity::rapidity_from_velocity(surface_vel, config.c);
                         rel_state.update_from_rapidity(config.c);
-                        shuttle.angular_velocity = Vec3::ZERO;
                     }
                 } else if user_active_thrust {
                     shuttle.landed_body = None;
@@ -1912,6 +2031,8 @@ pub fn shuttle_input_system(
                         let body_rot = b_tf_opt.map(|tf| tf.rotation.as_dquat()).unwrap_or(DQuat::IDENTITY);
                         shuttle.landed_body = Some(body_ent);
                         shuttle.landed_local_normal = (body_rot.inverse() * normal).normalize();
+                        transform.rotation = align_shuttle_to_surface(transform.rotation, normal.as_vec3());
+                        shuttle.angular_velocity = Vec3::ZERO;
                     }
                     rel_state.velocity = surface_vel;
                     rel_state.rapidity = crate::relativity::rapidity_from_velocity(surface_vel, config.c);
@@ -3841,16 +3962,19 @@ mod tests {
         app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
         app.update();
 
-        // Must be landed and orientation preserved (NO auto-rotation)
+        // Must be landed and orientation aligned to surface normal (flat on landing skids)
         let s_landed = app.world().get::<Shuttle>(shuttle_ent).unwrap();
         let tf_landed = app.world().get::<Transform>(shuttle_ent).unwrap();
         assert_eq!(s_landed.landed_body, Some(haumea_ent), "Must land gently on Haumea surface");
+        let expected_landed_rot = align_shuttle_to_surface(initial_rot, Vec3::X);
+        let dot_landed = tf_landed.rotation.dot(expected_landed_rot).abs();
         assert!(
-            (tf_landed.rotation.dot(initial_rot).abs() - 1.0).abs() < 1e-4,
-            "Shuttle rotation must NOT be overwritten by auto-rotation upon landing"
+            (dot_landed - 1.0).abs() < 1e-4,
+            "Shuttle rotation upon touchdown must align flat on its landing gear to the surface normal, dot: {}",
+            dot_landed
         );
 
-        // 2. Free-look and steering while landed: yaw and pitch controls must work (never stuck)
+        // 2. Free steering while landed: yaw steering control must work (never stuck)
         {
             let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
             kb.press(KeyCode::ArrowLeft);
@@ -3859,11 +3983,11 @@ mod tests {
         app.update();
 
         let tf_steered = app.world().get::<Transform>(shuttle_ent).unwrap();
-        let dot = tf_steered.rotation.dot(initial_rot).abs();
+        let dot_steered = tf_steered.rotation.dot(expected_landed_rot).abs();
         assert!(
-            dot < 1.0 - 1e-8,
+            dot_steered < 1.0 - 1e-8,
             "Steering input while landed must rotate the ship without auto-lock resetting it, dot: {}",
-            dot
+            dot_steered
         );
 
         // 3. Space vertical liftoff on Haumea (1161 km):
@@ -4068,5 +4192,326 @@ mod tests {
 
         // Hyperdrive lead buffer is tight (1.5 frames) to brake at the very last moment like sci-fi
         assert!(lead_buffer < 0.02 * c, "Lead buffer must remain tight for last-moment braking");
+    }
+
+    #[test]
+    fn test_landed_surface_lock_maintained_during_simulation_pause() {
+        let mut app = App::new();
+        let c = 299_792_458.0;
+        app.insert_resource(RelativisticConfig { c, time_scale: 1.0, is_demo_mode: false });
+        app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+        app.insert_resource(SimulationPause(true)); // Paused!
+        app.insert_resource(crate::navigation::NavigationComputer::default());
+        app.insert_resource(crate::celestial::CanopyVisorState::default());
+
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.add_event::<bevy::input::mouse::MouseMotion>();
+        app.add_event::<bevy::input::mouse::MouseWheel>();
+        app.init_resource::<Time>();
+
+        app.world_mut().spawn((Window::default(), bevy::window::PrimaryWindow));
+        app.world_mut().spawn((SpaceCamera::default(), Camera::default(), Transform::default(), GlobalTransform::default()));
+
+        let moon_radius = 1_737_400.0;
+        let moon_pos = DVec3::new(384_400_000.0, 0.0, 0.0);
+        let moon_ent = app.world_mut().spawn((
+            UniversalPosition(moon_pos),
+            crate::celestial::CelestialBody {
+                physical_radius: moon_radius,
+                mass_kg: 7.342e22,
+            },
+            Transform::IDENTITY,
+        )).id();
+
+        let landed_normal = DVec3::Y;
+        let initial_shuttle_pos = moon_pos + landed_normal * moon_radius;
+
+        let shuttle_entity = app.world_mut().spawn((
+            Shuttle {
+                landed_body: Some(moon_ent),
+                landed_local_normal: landed_normal,
+                ..default()
+            },
+            RelativisticState::default(),
+            UniversalPosition(initial_shuttle_pos),
+            Transform::from_rotation(Quat::IDENTITY),
+        )).id();
+
+        app.add_systems(Update, shuttle_input_system);
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+
+        // Check that shuttle position remains locked exactly to the Moon surface with 0 drift
+        let shuttle_upos = app.world().get::<UniversalPosition>(shuttle_entity).unwrap();
+        let dist = (shuttle_upos.0 - moon_pos).length();
+        assert!(
+            (dist - moon_radius).abs() < 1e-4,
+            "Landed shuttle position must stay exactly on Moon surface while paused: dist = {}, expected {}",
+            dist,
+            moon_radius
+        );
+    }
+
+    #[test]
+    fn test_pause_unpause_zero_orbital_jump() {
+        let mut app = App::new();
+        let c = 299_792_458.0;
+        app.insert_resource(RelativisticConfig { c, time_scale: 1.0, is_demo_mode: false });
+        app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+        app.insert_resource(SimulationPause(false));
+        app.insert_resource(crate::navigation::NavigationComputer::default());
+        app.insert_resource(crate::celestial::CanopyVisorState::default());
+
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.add_event::<bevy::input::mouse::MouseMotion>();
+        app.add_event::<bevy::input::mouse::MouseWheel>();
+        app.init_resource::<Time>();
+
+        app.world_mut().spawn((Window::default(), bevy::window::PrimaryWindow));
+        app.world_mut().spawn((SpaceCamera::default(), Camera::default(), Transform::default(), GlobalTransform::default()));
+
+        let sol_pos = DVec3::ZERO;
+        let sol_ent = app.world_mut().spawn((
+            UniversalPosition(sol_pos),
+            crate::celestial::CelestialBody {
+                physical_radius: 696_340_000.0,
+                mass_kg: 1.989e30,
+            },
+            Transform::IDENTITY,
+        )).id();
+
+        let earth_radius = 6_371_000.0;
+        let earth_orbit = crate::celestial::KeplerOrbit::circular(Some(sol_ent), 149_597_870_700.0, 0.0, 31_558_149.0, 0.0);
+        let (e_pos, e_vel) = earth_orbit.evaluate_state_at_time(0.0);
+        let earth_ent = app.world_mut().spawn((
+            UniversalPosition(e_pos),
+            crate::celestial::CelestialBody {
+                physical_radius: earth_radius,
+                mass_kg: 5.972e24,
+            },
+            crate::celestial::BodyVelocity(e_vel),
+            earth_orbit,
+            Transform::IDENTITY,
+        )).id();
+
+        let moon_radius = 1_737_400.0;
+        let moon_orbit = crate::celestial::KeplerOrbit::circular(Some(earth_ent), 384_400_000.0, 0.0, 2_360_585.0, 0.0);
+        let (m_pos, m_vel) = moon_orbit.evaluate_state_at_time(0.0);
+        let moon_ent = app.world_mut().spawn((
+            UniversalPosition(e_pos + m_pos),
+            crate::celestial::CelestialBody {
+                physical_radius: moon_radius,
+                mass_kg: 7.342e22,
+            },
+            crate::celestial::BodyVelocity(e_vel + m_vel),
+            moon_orbit,
+            crate::celestial::SatelliteOrbit,
+            crate::celestial::NavTarget {
+                name: "Luna",
+                classification: "Moon",
+                radius_m: moon_radius,
+            },
+            Transform::IDENTITY,
+        )).id();
+
+        let landed_normal = DVec3::Y;
+        let initial_moon_upos = e_pos + m_pos;
+        let initial_shuttle_pos = initial_moon_upos + landed_normal * moon_radius;
+
+        let shuttle_entity = app.world_mut().spawn((
+            Shuttle {
+                landed_body: Some(moon_ent),
+                landed_local_normal: landed_normal,
+                ..default()
+            },
+            RelativisticState::default(),
+            UniversalPosition(initial_shuttle_pos),
+            Transform::from_rotation(Quat::IDENTITY),
+        )).id();
+
+        app.add_systems(
+            Update,
+            (
+                shuttle_time_system,
+                crate::celestial::axial_rotation_system,
+                crate::celestial::planet_orbit_system,
+                crate::celestial::satellite_orbit_system,
+                shuttle_input_system,
+                crate::navigation::navigation_targeting_system,
+                crate::coords::floating_origin_system,
+            ).chain(),
+        );
+
+        // Frame 1: Running (unpaused) for 16ms
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+
+        let m_upos_1 = app.world().get::<UniversalPosition>(moon_ent).unwrap().0;
+        let s_upos_1 = app.world().get::<UniversalPosition>(shuttle_entity).unwrap().0;
+        let dist_1 = (s_upos_1 - m_upos_1).length();
+        let m_tf_1 = app.world().get::<Transform>(moon_ent).unwrap().translation;
+
+        // Frame 2: Toggle PAUSE (F1 pressed)
+        app.world_mut().resource_mut::<SimulationPause>().0 = true;
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+
+        let m_upos_2 = app.world().get::<UniversalPosition>(moon_ent).unwrap().0;
+        let s_upos_2 = app.world().get::<UniversalPosition>(shuttle_entity).unwrap().0;
+        let dist_2 = (s_upos_2 - m_upos_2).length();
+        let m_tf_2 = app.world().get::<Transform>(moon_ent).unwrap().translation;
+
+        // Frame 3: Remains PAUSED
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+
+        let m_upos_3 = app.world().get::<UniversalPosition>(moon_ent).unwrap().0;
+        let s_upos_3 = app.world().get::<UniversalPosition>(shuttle_entity).unwrap().0;
+        let dist_3 = (s_upos_3 - m_upos_3).length();
+        let m_tf_3 = app.world().get::<Transform>(moon_ent).unwrap().translation;
+
+        // Verify zero orbital jump when paused (less than 1 millimeter drift)
+        assert!((dist_2 - dist_1).abs() < 1e-4, "Distance to Moon must not jump on pause: dist1 = {}, dist2 = {}", dist_1, dist_2);
+        assert!((dist_3 - dist_2).abs() < 1e-4, "Distance to Moon must not drift during pause: dist2 = {}, dist3 = {}", dist_2, dist_3);
+        assert!((m_tf_2 - m_tf_1).length() < 1e-4, "Moon visual translation must not jump on pause: tf1 = {:?}, tf2 = {:?}", m_tf_1, m_tf_2);
+        assert!((m_tf_3 - m_tf_2).length() < 1e-4, "Moon visual translation must not move while paused: tf2 = {:?}, tf3 = {:?}", m_tf_2, m_tf_3);
+        assert!((m_upos_2 - m_upos_1).length() < 1e-6, "Moon universal position must freeze completely on pause");
+        assert!((s_upos_2 - s_upos_1).length() < 1e-6, "Shuttle universal position must freeze completely on pause");
+    }
+
+    #[test]
+    fn test_mouse_steering_rate_limited_in_slow_motion() {
+        let run_sim = |time_scale: f64| -> f32 {
+            let mut app = App::new();
+            let mut config = RelativisticConfig::default();
+            config.time_scale = time_scale;
+            app.insert_resource(config);
+            app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+            app.insert_resource(SimulationPause(false));
+            app.insert_resource(crate::navigation::NavigationComputer::default());
+            app.insert_resource(ButtonInput::<KeyCode>::default());
+            app.insert_resource(ButtonInput::<MouseButton>::default());
+            app.add_event::<bevy::input::mouse::MouseMotion>();
+            app.add_event::<bevy::input::mouse::MouseWheel>();
+            app.init_resource::<Time>();
+
+            let mut window = Window::default();
+            window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
+            app.world_mut().spawn((
+                window,
+                bevy::window::PrimaryWindow,
+            ));
+            app.world_mut().spawn((
+                SpaceCamera::default(),
+                Camera::default(),
+                Transform::default(),
+                GlobalTransform::default(),
+            ));
+            let shuttle_ent = app.world_mut().spawn((
+                Shuttle {
+                    flight_assist: true,
+                    ..default()
+                },
+                RelativisticState::default(),
+                UniversalPosition::default(),
+                Transform::from_rotation(Quat::IDENTITY),
+            )).id();
+
+            app.add_systems(Update, (shuttle_time_system, shuttle_input_system).chain());
+
+            // Initialize systems
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+            app.update();
+
+            // Send a large mouse motion event (e.g. 200 pixels)
+            app.world_mut().send_event(bevy::input::mouse::MouseMotion {
+                delta: Vec2::new(200.0, 0.0),
+            });
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+            app.update();
+
+            let rot = app.world().get::<Transform>(shuttle_ent).unwrap().rotation;
+            let diff = rot.inverse() * Quat::IDENTITY;
+            2.0 * diff.xyz().length().atan2(diff.w.abs())
+        };
+
+        let rot_normal = run_sim(1.0);
+        let rot_slow = run_sim(0.05);
+
+        assert!(rot_normal > 0.001, "Normal time must produce rotation from mouse movement: got {}", rot_normal);
+        assert!(rot_slow > 0.0, "Slow motion must still rotate: got {}", rot_slow);
+        assert!(
+            rot_slow < rot_normal * 0.15,
+            "Slow motion rotation must be strictly rate-limited by simulation time: normal = {}, slow = {}",
+            rot_normal, rot_slow
+        );
+    }
+
+    #[test]
+    fn test_liftoff_without_shift_at_165hz_space_and_forward() {
+        for key in [KeyCode::Space, KeyCode::KeyW] {
+            let mut app = App::new();
+            let c = 299_792_458.0;
+            app.insert_resource(RelativisticConfig { c, time_scale: 1.0, is_demo_mode: false });
+            app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+            app.insert_resource(SimulationPause(false));
+            app.insert_resource(crate::navigation::NavigationComputer::default());
+            app.insert_resource(crate::celestial::CanopyVisorState::default());
+            let mut kb = ButtonInput::<KeyCode>::default();
+            kb.press(key);
+            app.insert_resource(kb);
+            app.insert_resource(ButtonInput::<MouseButton>::default());
+            app.add_event::<bevy::input::mouse::MouseMotion>();
+            app.add_event::<bevy::input::mouse::MouseWheel>();
+            app.init_resource::<Time>();
+
+            app.world_mut().spawn((Window::default(), bevy::window::PrimaryWindow));
+            app.world_mut().spawn((SpaceCamera::default(), Camera::default(), Transform::default(), GlobalTransform::default()));
+
+            let earth_radius = 6_371_000.0;
+            let earth_ent = app.world_mut().spawn((
+                UniversalPosition(DVec3::ZERO),
+                crate::celestial::CelestialBody {
+                    physical_radius: earth_radius,
+                    mass_kg: 5.9722e24,
+                },
+                crate::celestial::BodyVelocity(DVec3::ZERO),
+                Transform::IDENTITY,
+            )).id();
+
+            // Landed flat on Earth's North Pole (+Y)
+            let shuttle_ent = app.world_mut().spawn((
+                Shuttle {
+                    landed_body: Some(earth_ent),
+                    landed_local_normal: DVec3::Y,
+                    ..default()
+                },
+                RelativisticState::default(),
+                UniversalPosition(DVec3::new(0.0, earth_radius, 0.0)),
+                Transform::IDENTITY,
+            )).id();
+
+            app.add_systems(Update, (shuttle_time_system, shuttle_input_system).chain());
+
+            // Simulate 165 frames (1.0 second at 165 Hz) holding Space or W WITHOUT Shift
+            let frame_dt = std::time::Duration::from_micros(6061);
+            for _ in 0..165 {
+                app.world_mut().resource_mut::<Time>().advance_by(frame_dt);
+                app.update();
+            }
+
+            let s = app.world().get::<Shuttle>(shuttle_ent).unwrap();
+            let upos = app.world().get::<UniversalPosition>(shuttle_ent).unwrap();
+            let alt = upos.0.length() - earth_radius;
+            assert_eq!(s.landed_body, None, "Key {:?} without Shift must disengage landed lock", key);
+            assert!(
+                alt > 2.0,
+                "Holding {:?} without Shift at 165 Hz on Earth must lift off cleanly above 2m within 1s, got alt = {:.3} m",
+                key,
+                alt
+            );
+        }
     }
 }

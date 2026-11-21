@@ -66,10 +66,10 @@ pub fn camera_toggle_system(
 /// to guarantee zero gimbal singularity jitter.
 pub fn camera_follow_system(
     time: Res<Time>,
-    shuttle_query: Query<&Transform, (With<Shuttle>, Without<SpaceCamera>)>,
+    shuttle_query: Query<(&Transform, &Shuttle), Without<SpaceCamera>>,
     mut camera_query: Query<(&mut SpaceCamera, &mut Transform)>,
 ) {
-    let Ok(shuttle_tf) = shuttle_query.get_single() else {
+    let Ok((shuttle_tf, shuttle)) = shuttle_query.get_single() else {
         return;
     };
     let dt = time.delta_secs();
@@ -105,10 +105,10 @@ pub fn camera_follow_system(
         } else {
             0.0
         };
-        let head_rot = Quat::from_euler(EulerRot::YXZ, cam.look_yaw + rear_yaw, cam.look_pitch, 0.0);
 
         match cam.mode {
             CameraViewMode::Cockpit => {
+                let head_rot = Quat::from_euler(EulerRot::YXZ, cam.look_yaw + rear_yaw, cam.look_pitch, 0.0);
                 // Cockpit view: placed at eye position on the shuttle, rotated by head look
                 cam_tf.translation = shuttle_tf.rotation * cam.cockpit_offset;
                 cam_tf.rotation = (shuttle_tf.rotation * head_rot).normalize();
@@ -122,10 +122,24 @@ pub fn camera_follow_system(
                 let pitch_down = dy.atan2(dz);
                 let base_cam_rot = Quat::from_rotation_x(-pitch_down);
 
+                let head_rot = Quat::from_euler(EulerRot::YXZ, cam.look_yaw + rear_yaw, cam.look_pitch, 0.0);
                 let orbit_offset = head_rot * Vec3::new(0.0, dy, dz);
                 let cam_pos = pivot + orbit_offset;
 
-                cam_tf.translation = shuttle_tf.rotation * cam_pos;
+                let mut cam_world = shuttle_tf.rotation * cam_pos;
+                // When landed on a celestial body, clamp camera elevation along the surface normal
+                // so it never drops below ground level, accounting for flat UV-sphere polygon slope
+                // at chase orbit distance plus camera near-clip plane.
+                if shuttle.landed_body.is_some() {
+                    let surface_up = (shuttle_tf.rotation * Vec3::Y).normalize();
+                    let min_elevation = (-8.5f32 + cam.chase_distance * 0.01).min(0.0);
+                    let current_elevation = cam_world.dot(surface_up);
+                    if current_elevation < min_elevation {
+                        cam_world += surface_up * (min_elevation - current_elevation);
+                    }
+                }
+
+                cam_tf.translation = cam_world;
                 cam_tf.rotation = (shuttle_tf.rotation * head_rot * base_cam_rot).normalize();
             }
         }
@@ -324,5 +338,77 @@ mod tests {
         let win = app.world().get::<Window>(window_ent).unwrap();
         assert_eq!(win.cursor_options.grab_mode, CursorGrabMode::Locked);
         assert!(!win.cursor_options.visible);
+    }
+
+    #[test]
+    fn test_perspective_projection_astronomical_far() {
+        use bevy::render::camera::CameraProjection;
+        let mut proj = PerspectiveProjection {
+            near: 0.1,
+            far: 1.0e16,
+            fov: std::f32::consts::PI / 4.0,
+            ..default()
+        };
+        proj.update(1920.0, 1080.0);
+        let mat = proj.get_clip_from_view();
+        assert!(!mat.is_nan());
+
+        // In Bevy's Reversed-Z Vulkan projection:
+        // View space is right-handed (looking down -Z):
+        // At near plane (-0.1), z_ndc = 1.0
+        // As distance increases towards -infinity, z_ndc decreases towards 0.0
+        let p_near = mat.project_point3(Vec3::new(0.0, 0.0, -0.1));
+        let p_earth = mat.project_point3(Vec3::new(0.0, 0.0, -6_371_000.0));
+        let p_sun = mat.project_point3(Vec3::new(0.0, 0.0, -149_597_870_700.0));
+        let p_pluto = mat.project_point3(Vec3::new(0.0, 0.0, -5_906_380_000_000.0));
+        let p_far = mat.project_point3(Vec3::new(0.0, 0.0, -1.0e16));
+
+        assert!((p_near.z - 1.0).abs() < 1e-4, "Near plane must project to ~1.0 in Reversed-Z: got {}", p_near.z);
+        assert!(p_near.z > p_earth.z, "Near must be closer (higher Z) than Earth");
+        assert!(p_earth.z > p_sun.z, "Earth must be closer than Sun");
+        assert!(p_sun.z > p_pluto.z, "Sun must be closer than Pluto");
+        assert!(p_pluto.z > p_far.z, "Pluto must be closer than Far plane");
+        assert!(p_far.z >= 0.0, "Far plane must stay inside the Reversed-Z frustum [0.0, 1.0]");
+    }
+
+    #[test]
+    fn test_chase_camera_landed_ground_clamp() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+
+        // Spawn landed shuttle (landed_body is Some)
+        let mut landed_shuttle = Shuttle::default();
+        let dummy_body = app.world_mut().spawn_empty().id();
+        landed_shuttle.landed_body = Some(dummy_body);
+
+        app.world_mut().spawn((
+            landed_shuttle,
+            Transform::IDENTITY,
+        ));
+
+        // Spawn chase camera pitched way up to +73 deg (1.27 rad) which would penetrate ground without clamp
+        let mut cam = SpaceCamera::default();
+        cam.mode = CameraViewMode::Chase;
+        cam.chase_distance = 350.0;
+        cam.target_chase_distance = 350.0;
+        cam.chase_height = 75.0;
+        cam.look_pitch = 1.274; // ~73 deg
+        cam.target_look_pitch = 1.274;
+
+        let cam_ent = app.world_mut().spawn((
+            cam,
+            Transform::IDENTITY,
+        )).id();
+
+        app.add_systems(Update, camera_follow_system);
+        app.update();
+
+        let cam_tf = app.world().get::<Transform>(cam_ent).unwrap();
+        // Camera Y must stay well above ground plane at -13.95m (for chase_distance=350m, min_elevation = -5.0m)
+        assert!(
+            cam_tf.translation.y >= -5.01,
+            "Landed chase camera must stay safely above ground, got Y = {}",
+            cam_tf.translation.y
+        );
     }
 }

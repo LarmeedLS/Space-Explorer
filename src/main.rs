@@ -33,8 +33,8 @@ use celestial::{
 };
 use coords::floating_origin_system;
 use flight::{
-    fps_tracking_system, pause_toggle_system, shuttle_input_system, update_engine_plumes,
-    vsync_toggle_system, FpsTracker, SimulationPause,
+    fps_tracking_system, pause_toggle_system, shuttle_input_system, shuttle_time_system,
+    update_engine_plumes, vsync_toggle_system, FpsTracker, SimulationPause,
 };
 use navigation::{
     navigation_targeting_system, setup_navigation_ui, update_navigation_reticle_system,
@@ -180,6 +180,7 @@ fn main() {
                 audio_mute_toggle_system,
                 // Synchronized celestial axial rotation & orbital motion -> shuttle physics & collision -> targeting -> UI display:
                 (
+                    shuttle_time_system,
                     axial_rotation_system,
                     planet_orbit_system,
                     satellite_orbit_system,
@@ -301,7 +302,7 @@ fn setup_camera(mut commands: Commands) {
         Fxaa::default(),
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            far: 500_000.0,
+            far: 1.0e16,
             fov: std::f32::consts::PI / 4.0,
             ..default()
         }),

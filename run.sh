@@ -88,10 +88,14 @@ check_prerequisites() {
 }
 
 configure_optimizations() {
-    # 1. Use sccache as compiler cache wrapper if available
-    if command -v sccache &> /dev/null && [ -z "${RUSTC_WRAPPER:-}" ]; then
+    # 1. Use sccache as compiler cache wrapper if available (unless RUSTC_WRAPPER is explicitly set)
+    if command -v sccache &> /dev/null && [ -z "${RUSTC_WRAPPER+x}" ]; then
         export RUSTC_WRAPPER="sccache"
         log_info "Compiler Cache: Enabled sccache (${BOLD}RUSTC_WRAPPER=sccache${RESET})"
+    elif [ -n "${RUSTC_WRAPPER:-}" ]; then
+        log_info "Compiler Cache: Custom wrapper (${BOLD}RUSTC_WRAPPER=${RUSTC_WRAPPER}${RESET})"
+    else
+        log_info "Compiler Cache: Disabled"
     fi
 
     # 2. Configure lightning-fast linker (mold > lld)

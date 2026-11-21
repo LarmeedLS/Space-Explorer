@@ -7,7 +7,7 @@ use bevy::render::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::render::primitives::Aabb;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, CompareFunction,
     RenderPipelineDescriptor, ShaderRef, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::render::view::NoFrustumCulling;
@@ -115,6 +115,7 @@ impl Material for RelativisticStarMaterial {
         }
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             ds.depth_write_enabled = false;
+            ds.depth_compare = CompareFunction::GreaterEqual;
         }
         Ok(())
     }
