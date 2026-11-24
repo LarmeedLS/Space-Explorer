@@ -397,6 +397,7 @@ pub fn update_orbital_radar_system(
     all_targets_query: Query<(Entity, &NavTarget, &UniversalPosition)>,
     orbiting_bodies_query: Query<(Entity, &NavTarget, &UniversalPosition, &KeplerOrbit), Without<SatelliteOrbit>>,
     mut nav: ResMut<NavigationComputer>,
+    hud_state: Option<Res<crate::ui::HudDisplayState>>,
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
@@ -444,16 +445,19 @@ pub fn update_orbital_radar_system(
         }
     }
 
-    // Apply visibility to UI container
+    let hud_is_full = hud_state.as_ref().map_or(true, |h| h.mode == crate::ui::HudDisplayMode::Full);
+
+    // Apply visibility to UI container (only visible in Full HUD mode when radar is enabled)
+    let show_radar = radar.visible && hud_is_full;
     for mut node in radar_root_query.iter_mut() {
-        node.display = if radar.visible {
+        node.display = if show_radar {
             Display::Flex
         } else {
             Display::None
         };
     }
 
-    if !radar.visible {
+    if !show_radar {
         return;
     }
 

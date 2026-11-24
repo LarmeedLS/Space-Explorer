@@ -706,11 +706,22 @@ pub fn setup_navigation_ui(mut commands: Commands, asset_server: Res<AssetServer
 /// Updates position and visibility of both the apparent holographic reticle and the true rest-frame reticle
 pub fn update_navigation_reticle_system(
     nav: Res<NavigationComputer>,
+    hud_state: Option<Res<crate::ui::HudDisplayState>>,
     mut reticle_query: Query<(&mut Node, &mut BorderColor), (With<TargetReticleUi>, Without<TrueTargetReticleUi>)>,
     mut text_query: Query<&mut Text, (With<TargetReticleText>, Without<TrueTargetReticleText>)>,
     mut true_reticle_query: Query<&mut Node, (With<TrueTargetReticleUi>, Without<TargetReticleUi>)>,
     mut true_text_query: Query<&mut Text, (With<TrueTargetReticleText>, Without<TargetReticleText>)>,
 ) {
+    if hud_state.as_ref().map_or(false, |h| h.mode == crate::ui::HudDisplayMode::Hidden) {
+        if let Ok((mut node, _)) = reticle_query.get_single_mut() {
+            node.display = Display::None;
+        }
+        if let Ok(mut true_node) = true_reticle_query.get_single_mut() {
+            true_node.display = Display::None;
+        }
+        return;
+    }
+
     // 1. Primary Apparent Reticle
     if let (Ok((mut node, mut border_color)), Ok(mut label)) = (
         reticle_query.get_single_mut(),

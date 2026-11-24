@@ -127,6 +127,102 @@ pub struct VisorStatusText;
 #[derive(Component)]
 pub struct VisorScreenOverlay;
 
+/// Active HUD display mode: Full telemetry, Minimal essential info, or completely Hidden
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+pub enum HudDisplayMode {
+    /// Complete scientific telemetry panels, gauges, orbital radar, clocks, and controls bar
+    #[default]
+    Full,
+    /// Compact, unobtrusive flight HUD showing only essential telemetry (speed, β/γ, altitude, target, clocks)
+    Minimal,
+    /// Pure game view — 100% of HUD panels, reticles, crosshair, and bars hidden
+    Hidden,
+}
+
+impl HudDisplayMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            HudDisplayMode::Full => "FULL",
+            HudDisplayMode::Minimal => "MINIMAL",
+            HudDisplayMode::Hidden => "HIDDEN",
+        }
+    }
+}
+
+/// Resource managing the active HUD display mode (Hotkeys: I to cycle, Shift+I to toggle Hidden)
+#[derive(Resource, Debug, Clone)]
+pub struct HudDisplayState {
+    pub mode: HudDisplayMode,
+    /// Remembers the last visible mode (Full or Minimal) so Shift+I restores it cleanly
+    pub last_visible_mode: HudDisplayMode,
+}
+
+impl Default for HudDisplayState {
+    fn default() -> Self {
+        Self {
+            mode: HudDisplayMode::Full,
+            last_visible_mode: HudDisplayMode::Full,
+        }
+    }
+}
+
+impl HudDisplayState {
+    /// Cycles Full -> Minimal -> Hidden -> Full
+    pub fn cycle(&mut self) {
+        self.mode = match self.mode {
+            HudDisplayMode::Full => {
+                self.last_visible_mode = HudDisplayMode::Minimal;
+                HudDisplayMode::Minimal
+            }
+            HudDisplayMode::Minimal => {
+                self.last_visible_mode = HudDisplayMode::Minimal;
+                HudDisplayMode::Hidden
+            }
+            HudDisplayMode::Hidden => {
+                self.last_visible_mode = HudDisplayMode::Full;
+                HudDisplayMode::Full
+            }
+        };
+    }
+
+    /// Instantly toggles between Hidden and the last active visible mode (Full or Minimal)
+    pub fn toggle_hidden(&mut self) {
+        if self.mode == HudDisplayMode::Hidden {
+            self.mode = match self.last_visible_mode {
+                HudDisplayMode::Hidden => HudDisplayMode::Full,
+                other => other,
+            };
+        } else {
+            self.last_visible_mode = self.mode;
+            self.mode = HudDisplayMode::Hidden;
+        }
+    }
+}
+
+/// Marker for HUD containers shown only in Full HUD mode (top full panels & bottom controls bar)
+#[derive(Component)]
+pub struct FullHudElement;
+
+/// Root container for the compact Minimal HUD top bar
+#[derive(Component)]
+pub struct MinimalHudRoot;
+
+/// Top-left compact kinematics text in Minimal HUD mode
+#[derive(Component)]
+pub struct MinimalKinematicsText;
+
+/// Top-center compact target lock container in Minimal HUD mode
+#[derive(Component)]
+pub struct MinimalTargetBox;
+
+/// Top-center compact target lock text in Minimal HUD mode
+#[derive(Component)]
+pub struct MinimalTargetText;
+
+/// Top-right compact clocks & FPS text in Minimal HUD mode
+#[derive(Component)]
+pub struct MinimalMetricsText;
+
 /// Resource managing visibility of the Cockpit MFD Settings & Help Overlay (Hotkey: F9)
 #[derive(Resource, Debug, Clone, Default)]
 pub struct SettingsOverlayState {
@@ -306,7 +402,7 @@ pub fn setup_ui(
 
                     col.spawn((
                         Text::new(
-                            "FLIGHT & ATTITUDE:\n  [↑ / ↓] / Mouse         Pitch Down / Up\n  [← / →] / Mouse         Yaw Port / Starboard\n  [A / E]                 Roll Port / Starboard\n  [Z / Left-Click]        Main Plasma Thrusters\n  [S / Right-Click]       Reverse Retro-Thrusters\n  [Q / D]                 Lateral Strafe Port/Starboard\n  [Shift]                 Afterburner Boost Thruster\n  [X]                     Emergency Retro-Brake\n  [W]                     Toggle SAS Attitude Assist\n  [R / Num .]             Reset Ship to Runway\n\nTARGETING, AUTOPILOT & RADAR:\n  [T / Y]                 Cycle Target / Lock Nearest\n  [G / MMB]               Point & Select Target (Shift+G Clear)\n  [F]                     Auto-Aim Target Align\n  [H]                     Sci-Fi Warp Autopilot (Instant Drop)\n  [L]                     Lorentz Autopilot (Midcourse Flip)\n  [N]                     Toggle Orbital Radar Map (Shift+N Mode)\n\nOPTICS, TIME & SYSTEM:\n  [U / F10]               Switch Universe (Demo ↔ 1:1 Solar System)\n  [K]                     Canopy Visor (Clear/Pol/H-α)\n  [M]                     Mute\n  [F1 / Return]           Pause\n  [F2]                    VSync\n  [Alt / F3]              Free-Look\n  [Num 8/2/4/6/5]         Numpad Look (8/2/4/6, 5 Center)\n  [F4 / F5]               Toggle Aberration / Doppler\n  [F6 / F7 / F8]          Slow-Mo / Time-Warp / Reset\n  [F9]                    Info and Controls Menu\n  [F11]                   Toggle Fullscreen (Borderless / Windowed)\n  [F12 / Shift+F12]       Texture Profile (8K/4K/2K) / Toggle Dynamic Streaming\n  [O / P]                 Adjust Light Constant c\n  [V] • [Scroll]          Camera Mode • Zoom\n  [Tab]                   Mouse Locking"
+                            "FLIGHT & ATTITUDE:\n  [↑ / ↓] / Mouse         Pitch Down / Up\n  [← / →] / Mouse         Yaw Port / Starboard\n  [A / E]                 Roll Port / Starboard\n  [Z / Left-Click]        Main Plasma Thrusters\n  [S / Right-Click]       Reverse Retro-Thrusters\n  [Q / D]                 Lateral Strafe Port/Starboard\n  [Shift]                 Afterburner Boost Thruster\n  [X]                     Emergency Retro-Brake\n  [W]                     Toggle SAS Attitude Assist\n  [R / Num .]             Reset Ship to Runway\n\nTARGETING, AUTOPILOT & RADAR:\n  [T / Y]                 Cycle Target / Lock Nearest\n  [G / MMB]               Point & Select Target (Shift+G Clear)\n  [F]                     Auto-Aim Target Align\n  [H]                     Sci-Fi Warp Autopilot (Instant Drop)\n  [L]                     Lorentz Autopilot (Midcourse Flip)\n  [N]                     Toggle Orbital Radar Map (Shift+N Mode)\n\nOPTICS, HUD, TIME & SYSTEM:\n  [I / Shift+I]           Cycle HUD (Full/Minimal/Hide) / Hide UI\n  [U / F10]               Switch Universe (Demo ↔ 1:1 Solar System)\n  [K]                     Canopy Visor (Clear/Pol/H-α)\n  [M]                     Mute\n  [F1 / Return]           Pause\n  [F2]                    VSync\n  [Alt / F3]              Free-Look\n  [Num 8/2/4/6/5]         Numpad Look (8/2/4/6, 5 Center)\n  [F4 / F5]               Toggle Aberration / Doppler\n  [F6 / F7 / F8]          Slow-Mo / Time-Warp / Reset\n  [F9]                    Info and Controls Menu\n  [F11]                   Toggle Fullscreen (Borderless / Windowed)\n  [F12 / Shift+F12]       Texture Profile (8K/4K/2K) / Toggle Dynamic Streaming\n  [O / P]                 Adjust Light Constant c\n  [V] • [Scroll]          Camera Mode • Zoom\n  [Tab]                   Mouse Locking"
                         ),
                         TextFont {
                             font: font_mono.clone(),
@@ -393,14 +489,117 @@ pub fn setup_ui(
             ..default()
         })
         .with_children(|root| {
+            // Compact Minimal HUD Top Bar (Displayed only in HudDisplayMode::Minimal)
+            root.spawn((
+                MinimalHudRoot,
+                Node {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    display: Display::None,
+                    ..default()
+                },
+            ))
+            .with_children(|min_bar| {
+                // Top-Left Compact Kinematics Pill (Line 1: SPD/β/γ, Line 2: ALT & status tags)
+                min_bar
+                    .spawn((
+                        Node {
+                            padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                            border: UiRect::all(Val::Px(1.0)),
+                            min_width: Val::Px(310.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.72)),
+                        BorderColor(Color::srgba(0.2, 0.6, 1.0, 0.45)),
+                    ))
+                    .with_children(|pill| {
+                        pill.spawn((
+                            MinimalKinematicsText,
+                            Text::new("SPD: 0.0 m/s (0.00% c)  •  γ: 1.00×"),
+                            TextFont {
+                                font: font_mono.clone(),
+                                font_size: 12.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.88, 0.95, 1.0)),
+                        ));
+                    });
+
+                // Top-Center Compact Target Lock Pill (strictly centered, immune to left/right width changes)
+                min_bar
+                    .spawn(Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(0.0),
+                        right: Val::Px(0.0),
+                        top: Val::Px(0.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::FlexStart,
+                        ..default()
+                    })
+                    .with_children(|center_wrap| {
+                        center_wrap
+                            .spawn((
+                                MinimalTargetBox,
+                                Node {
+                                    padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                                    border: UiRect::all(Val::Px(1.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.72)),
+                                BorderColor(Color::srgba(0.2, 0.8, 0.6, 0.45)),
+                            ))
+                            .with_children(|pill| {
+                                pill.spawn((
+                                    MinimalTargetText,
+                                    Text::new("LOCK: [NO TARGET]"),
+                                    TextFont {
+                                        font: font_mono.clone(),
+                                        font_size: 12.0,
+                                        ..default()
+                                    },
+                                    TextColor(Color::srgb(0.4, 1.0, 0.8)),
+                                ));
+                            });
+                    });
+
+                // Top-Right Compact Clocks & FPS Pill
+                min_bar
+                    .spawn((
+                        Node {
+                            padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
+                            border: UiRect::all(Val::Px(1.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.72)),
+                        BorderColor(Color::srgba(0.2, 0.6, 1.0, 0.45)),
+                    ))
+                    .with_children(|pill| {
+                        pill.spawn((
+                            MinimalMetricsText,
+                            Text::new("τ: 00:00  |  t: 00:00  •  60 FPS  •  [I] HUD"),
+                            TextFont {
+                                font: font_mono.clone(),
+                                font_size: 12.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.85, 0.92, 1.0)),
+                        ));
+                    });
+            });
+
             // Top HUD Bar (Left: Speed/Beta/Gamma/Coords, Right: Dual Clocks/Settings/Orientation)
-            root.spawn(Node {
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::SpaceBetween,
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::FlexStart,
-                ..default()
-            })
+            root.spawn((
+                FullHudElement,
+                Node {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    ..default()
+                },
+            ))
             .with_children(|top_bar| {
                 // Left Column: Relativistic Avionics Panel + Solar System Orbital Radar Map
                 top_bar
@@ -937,6 +1136,7 @@ pub fn setup_ui(
 
             // Bottom Controls Bar with AZERTY Keymapping, Cruise Locks, and Performance shortcuts
             root.spawn((
+                FullHudElement,
                 Node {
                     width: Val::Percent(100.0),
                     justify_content: JustifyContent::Center,
@@ -951,7 +1151,7 @@ pub fn setup_ui(
             .with_children(|bar| {
                 bar.spawn((
                     Text::new(
-                        "[Z/L-Click] Thrust • [S/R-Click] Retro • [T/Y/G] Target • [F] Aim • [H] Warp AP • [L] Lorentz AP • [N] Radar • [Shift+N] Target Zoom • [K] Visor • [M] Mute • [W] SAS • [R] Reset • [U] Universe • [F1] Pause • [F4] Aberr • [F5] Doppler • [F6/F7/F8] Time • [F9] Menu • [F11] Fullscreen • [F12] Quality • [Shift+F12] Streaming",
+                        "[Z/L-Click] Thrust • [S/R-Click] Retro • [T/Y/G] Target • [F] Aim • [H] Warp AP • [L] Lorentz AP • [N] Radar • [I] HUD • [Shift+I] Hide UI • [K] Visor • [M] Mute • [W] SAS • [R] Reset • [U] Universe • [F1] Pause • [F4] Aberr • [F5] Doppler • [F6-F8] Time • [F9] Menu • [F11] Fullscreen • [F12] Quality",
                     ),
                     TextFont {
                         font: font_sans.clone(),
@@ -1863,6 +2063,179 @@ pub fn canopy_visor_ui_system(
     }
 }
 
+/// Listens for [I] (cycle Full -> Minimal -> Hidden) and [Shift+I] (instant toggle Hidden)
+pub fn hud_display_input_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut hud_state: ResMut<HudDisplayState>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyI) {
+        let shift_pressed = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+        if shift_pressed {
+            hud_state.toggle_hidden();
+        } else {
+            hud_state.cycle();
+        }
+    }
+}
+
+/// Applies active HUD display mode visibility (Full / Minimal / Hidden) and updates Minimal HUD readouts
+pub fn hud_display_update_system(
+    hud_state: Res<HudDisplayState>,
+    shuttle_query: Query<(&Shuttle, &RelativisticState), With<Shuttle>>,
+    config: Res<RelativisticConfig>,
+    pause: Res<SimulationPause>,
+    fps_tracker: Res<FpsTracker>,
+    nav: Res<crate::navigation::NavigationComputer>,
+    mut full_hud_query: Query<&mut Node, (With<FullHudElement>, Without<MinimalHudRoot>, Without<MinimalTargetBox>, Without<StartupCreditsToast>)>,
+    mut minimal_root_query: Query<&mut Node, (With<MinimalHudRoot>, Without<FullHudElement>, Without<MinimalTargetBox>, Without<StartupCreditsToast>)>,
+    mut minimal_target_box_query: Query<&mut Node, (With<MinimalTargetBox>, Without<FullHudElement>, Without<MinimalHudRoot>, Without<StartupCreditsToast>)>,
+    mut toast_query: Query<&mut Node, (With<StartupCreditsToast>, Without<FullHudElement>, Without<MinimalHudRoot>, Without<MinimalTargetBox>)>,
+    mut min_kinematics_query: Query<&mut Text, (With<MinimalKinematicsText>, Without<MinimalTargetText>, Without<MinimalMetricsText>)>,
+    mut min_target_query: Query<&mut Text, (With<MinimalTargetText>, Without<MinimalKinematicsText>, Without<MinimalMetricsText>)>,
+    mut min_metrics_query: Query<&mut Text, (With<MinimalMetricsText>, Without<MinimalKinematicsText>, Without<MinimalTargetText>)>,
+) {
+    let full_display = if hud_state.mode == HudDisplayMode::Full {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in full_hud_query.iter_mut() {
+        if node.display != full_display {
+            node.display = full_display;
+        }
+    }
+
+    let minimal_display = if hud_state.mode == HudDisplayMode::Minimal {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in minimal_root_query.iter_mut() {
+        if node.display != minimal_display {
+            node.display = minimal_display;
+        }
+    }
+
+    let toast_display = if hud_state.mode == HudDisplayMode::Hidden {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut node in toast_query.iter_mut() {
+        if node.display != toast_display {
+            node.display = toast_display;
+        }
+    }
+
+    if hud_state.mode != HudDisplayMode::Minimal {
+        return;
+    }
+
+    let Ok((shuttle, rel_state)) = shuttle_query.get_single() else {
+        return;
+    };
+
+    // 1. Minimal Top-Left Kinematics Pill
+    let speed = rel_state.velocity.length();
+    let speed_str = if speed >= 10_000.0 {
+        format!("{:.2} km/s", speed / 1_000.0)
+    } else {
+        format!("{:.1} m/s", speed)
+    };
+
+    let alt_part = if shuttle.landed_body.is_some() {
+        "ALT: 0 m [TOUCHDOWN]".to_string()
+    } else if let Some(c_alt) = nav.closest_altitude_m {
+        if c_alt < 1.0 {
+            "ALT: 0 m [TOUCHDOWN]".to_string()
+        } else if c_alt < 50_000_000.0 {
+            format!("ALT: {}", crate::navigation::format_nav_distance(c_alt))
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let mut status_tags: Vec<String> = Vec::new();
+    if pause.0 {
+        status_tags.push("[PAUSED]".to_string());
+    } else if shuttle.autopilot_mode == crate::flight::AutopilotMode::Hyperdrive {
+        status_tags.push("[WARP AP]".to_string());
+    } else if shuttle.autopilot_mode == crate::flight::AutopilotMode::Lorentz {
+        status_tags.push("[LORENTZ AP]".to_string());
+    } else if shuttle.braking_active {
+        status_tags.push("[BRAKE]".to_string());
+    }
+    if (config.time_scale - 1.0).abs() >= 0.01 {
+        status_tags.push(format!("[{:.2}×]", config.time_scale));
+    }
+    if !shuttle.flight_assist {
+        status_tags.push("[SAS OFF]".to_string());
+    }
+
+    let mut second_line_parts: Vec<String> = Vec::new();
+    if !alt_part.is_empty() {
+        second_line_parts.push(alt_part);
+    }
+    if !status_tags.is_empty() {
+        second_line_parts.push(status_tags.join("  "));
+    }
+
+    let line1 = format!(
+        "SPD: {} ({:.2}% c)  •  γ: {:.2}×",
+        speed_str,
+        rel_state.beta * 100.0,
+        rel_state.gamma,
+    );
+    let full_kinematics = if second_line_parts.is_empty() {
+        line1
+    } else {
+        format!("{}\n{}", line1, second_line_parts.join("  •  "))
+    };
+
+    for mut text in min_kinematics_query.iter_mut() {
+        **text = full_kinematics.clone();
+    }
+
+    // 2. Minimal Top-Center Target Pill (only visible when a target is locked)
+    let has_target = nav.target_entity.is_some();
+    for mut node in minimal_target_box_query.iter_mut() {
+        let target_display = if has_target { Display::Flex } else { Display::None };
+        if node.display != target_display {
+            node.display = target_display;
+        }
+    }
+    if has_target {
+        let dist_str = crate::navigation::format_nav_distance(nav.distance_m);
+        let rel_spd_str = if nav.relative_speed >= 1_000.0 {
+            format!("{:.2} km/s", nav.relative_speed / 1_000.0)
+        } else {
+            format!("{:.1} m/s", nav.relative_speed)
+        };
+        for mut text in min_target_query.iter_mut() {
+            **text = format!(
+                "{}  •  {}  •  REL: {}",
+                nav.target_name.to_uppercase(),
+                dist_str,
+                rel_spd_str
+            );
+        }
+    }
+
+    // 3. Minimal Top-Right Clocks & FPS Pill
+    let ship_clock = format_timestamp(rel_state.proper_time);
+    let univ_clock = format_timestamp(rel_state.coordinate_time);
+    for mut text in min_metrics_query.iter_mut() {
+        **text = format!(
+            "τ {}  |  t {}  •  {:.0} FPS  •  [I] HUD",
+            ship_clock,
+            univ_clock,
+            fps_tracker.smoothed_fps
+        );
+    }
+}
+
 /// Listens for F9 to toggle the Cockpit MFD Settings & Help Overlay, and Escape to dismiss.
 /// Automatically manages mouse cursor visibility and locking state.
 pub fn settings_overlay_input_system(
@@ -1905,7 +2278,7 @@ pub fn update_settings_overlay_system(
     pause: Res<SimulationPause>,
     nav: Res<crate::navigation::NavigationComputer>,
     audio_settings: Res<crate::AudioSettings>,
-    texture_quality: Option<Res<crate::celestial::TextureQualityConfig>>,
+    (hud_state, texture_quality): (Option<Res<HudDisplayState>>, Option<Res<crate::celestial::TextureQualityConfig>>),
     texture_streaming: Option<Res<crate::celestial::DynamicTextureStreamingConfig>>,
     ram_cache: Option<Res<crate::celestial::PlanetTextureRamCache>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -2068,6 +2441,7 @@ pub fn update_settings_overlay_system(
              ROTATIONAL SAS:       {}\n\
              AUTOPILOT HOMING:     {}\n\
              NAVIGATION LOCK:      {}\n\
+             HUD DISPLAY MODE:     {}\n\
              AUDIO SOUNDTRACK:     {}\n\
              DISPLAY REFRESH:      {}",
             universe_str,
@@ -2094,6 +2468,7 @@ pub fn update_settings_overlay_system(
             if shuttle.flight_assist { "ACTIVE [DAMPED] (W)" } else { "INERTIAL [TUMBLING] (W)" },
             if shuttle.align_to_target { "ACTIVE CONTINUOUS (F)" } else { "STANDBY (F)" },
             target_name,
+            format!("{} (I / Shift+I)", hud_state.as_ref().map_or("FULL", |h| h.mode.label())),
             audio_str,
             vsync_str,
         );
@@ -2231,6 +2606,7 @@ fn format_timestamp(seconds: f64) -> String {
 pub fn crosshair_hover_system(
     camera_query: Query<(&Camera, &Transform, &SpaceCamera)>,
     pause: Res<SimulationPause>,
+    hud_state: Option<Res<HudDisplayState>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     shuttle_query: Query<&UniversalPosition, With<Shuttle>>,
     targets_query: Query<(&crate::celestial::NavTarget, &UniversalPosition, &Transform)>,
@@ -2247,6 +2623,12 @@ pub fn crosshair_hover_system(
     let Ok(mut hover_text) = hover_text_query.get_single_mut() else {
         return;
     };
+
+    if hud_state.as_ref().map_or(false, |h| h.mode == HudDisplayMode::Hidden) {
+        crosshair_node.display = Display::None;
+        **hover_text = "".to_string();
+        return;
+    }
 
     let is_cockpit = space_cam.mode == CameraViewMode::Cockpit;
     let is_freelook = space_cam.free_look_active
@@ -2836,5 +3218,90 @@ mod tests {
         // After 4 steps (0.4s total), opacity reaches 0.0
         tracker.opacity = (tracker.opacity - 0.3 * fade_speed).max(0.0);
         assert_eq!(tracker.opacity, 0.0);
+    }
+
+    #[test]
+    fn test_hud_display_mode_cycling_and_hide_toggle() {
+        let mut state = HudDisplayState::default();
+        assert_eq!(state.mode, HudDisplayMode::Full);
+
+        // I cycles Full -> Minimal -> Hidden -> Full
+        state.cycle();
+        assert_eq!(state.mode, HudDisplayMode::Minimal);
+        state.cycle();
+        assert_eq!(state.mode, HudDisplayMode::Hidden);
+        state.cycle();
+        assert_eq!(state.mode, HudDisplayMode::Full);
+
+        // Shift+I toggles Full <-> Hidden
+        state.toggle_hidden();
+        assert_eq!(state.mode, HudDisplayMode::Hidden);
+        state.toggle_hidden();
+        assert_eq!(state.mode, HudDisplayMode::Full);
+
+        // Switch to Minimal, then Shift+I toggles Minimal <-> Hidden
+        state.cycle();
+        assert_eq!(state.mode, HudDisplayMode::Minimal);
+        state.toggle_hidden();
+        assert_eq!(state.mode, HudDisplayMode::Hidden);
+        state.toggle_hidden();
+        assert_eq!(state.mode, HudDisplayMode::Minimal);
+    }
+
+    #[test]
+    fn test_hud_display_visibility_transitions() {
+        let mut app = App::new();
+        app.insert_resource(HudDisplayState::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(RelativisticConfig::default());
+        app.insert_resource(SimulationPause(false));
+        app.insert_resource(FpsTracker::default());
+        app.insert_resource(crate::navigation::NavigationComputer::default());
+
+        app.world_mut().spawn((Shuttle::default(), RelativisticState::default()));
+        let full_ent = app.world_mut().spawn((FullHudElement, Node::default())).id();
+        let min_root_ent = app.world_mut().spawn((MinimalHudRoot, Node { display: Display::None, ..default() })).id();
+        let min_tgt_box_ent = app.world_mut().spawn((MinimalTargetBox, Node::default())).id();
+        let toast_ent = app.world_mut().spawn((StartupCreditsToast { time_remaining: 10.0 }, Node::default())).id();
+        app.world_mut().spawn((MinimalKinematicsText, Text::new("")));
+        app.world_mut().spawn((MinimalTargetText, Text::new("")));
+        app.world_mut().spawn((MinimalMetricsText, Text::new("")));
+
+        app.add_systems(Update, (hud_display_input_system, hud_display_update_system).chain());
+
+        // 1. Default Full mode
+        app.update();
+        assert_eq!(app.world().get::<Node>(full_ent).unwrap().display, Display::Flex);
+        assert_eq!(app.world().get::<Node>(min_root_ent).unwrap().display, Display::None);
+        assert_eq!(app.world().get::<Node>(toast_ent).unwrap().display, Display::Flex);
+
+        // 2. Press I -> Minimal mode (Full hidden, Minimal visible, Target box hidden when no target)
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyI);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear_just_pressed(KeyCode::KeyI);
+        assert_eq!(app.world().resource::<HudDisplayState>().mode, HudDisplayMode::Minimal);
+        assert_eq!(app.world().get::<Node>(full_ent).unwrap().display, Display::None);
+        assert_eq!(app.world().get::<Node>(min_root_ent).unwrap().display, Display::Flex);
+        assert_eq!(app.world().get::<Node>(min_tgt_box_ent).unwrap().display, Display::None);
+
+        // 3. Press I again -> Hidden mode (Full, Minimal, and Toast all hidden)
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release(KeyCode::KeyI);
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyI);
+        app.update();
+        assert_eq!(app.world().resource::<HudDisplayState>().mode, HudDisplayMode::Hidden);
+        assert_eq!(app.world().get::<Node>(full_ent).unwrap().display, Display::None);
+        assert_eq!(app.world().get::<Node>(min_root_ent).unwrap().display, Display::None);
+        assert_eq!(app.world().get::<Node>(toast_ent).unwrap().display, Display::None);
+
+        // 4. Press Shift+I -> restores Minimal mode (the last visible mode)
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.release(KeyCode::KeyI);
+            kb.press(KeyCode::ShiftLeft);
+            kb.press(KeyCode::KeyI);
+        }
+        app.update();
+        assert_eq!(app.world().resource::<HudDisplayState>().mode, HudDisplayMode::Minimal);
+        assert_eq!(app.world().get::<Node>(min_root_ent).unwrap().display, Display::Flex);
     }
 }

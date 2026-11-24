@@ -136,6 +136,7 @@ Supports both **QWERTY** and **AZERTY** physical keyboard layouts:
 | Action | Key / Input | Notes |
 | :--- | :--- | :--- |
 | **Switch Universe Sector** | `U` / `F10` | Switches between 1:1 Realistic Solar System and Demo Sector |
+| **HUD Display Mode / Hide UI** | `I` / `Shift + I` | Cycles `Full → Minimal → Hidden` / instant toggle Hide UI |
 | **Cockpit MFD Menu & Help** | `F9` | Toggles live telemetry & keybinding reference modal |
 | **Canopy Visor / Solar Filter** | `K` | Cycles `CLEAR 100%` → `POLARIZED 25%` → `SOLAR FILTER 1.5%` |
 | **Pause / Resume** | `F1` or `Enter` | Freezes simulation; camera free-look remains active |

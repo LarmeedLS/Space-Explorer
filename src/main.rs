@@ -47,9 +47,10 @@ use stars::{
 };
 use ui::{
     canopy_visor_ui_system, crosshair_hover_system, fade_startup_credits_toast_system,
-    setup_loading_screen, setup_ui, settings_overlay_input_system, target_rolling_button_system,
-    universe_switch_button_system, update_loading_screen_system, update_relativistic_gauges_system,
-    update_settings_overlay_system, update_ui_system, SettingsOverlayState, StartupLoadingTracker,
+    hud_display_input_system, hud_display_update_system, setup_loading_screen, setup_ui,
+    settings_overlay_input_system, target_rolling_button_system, universe_switch_button_system,
+    update_loading_screen_system, update_relativistic_gauges_system, update_settings_overlay_system,
+    update_ui_system, HudDisplayState, SettingsOverlayState, StartupLoadingTracker,
 };
 use world::{
     canopy_visor_glass_system, configure_ship_materials_system, pulse_beacons_system,
@@ -112,6 +113,8 @@ fn main() {
         .insert_resource(CanopyVisorState::default())
         // Cockpit MFD settings & help overlay modal state
         .insert_resource(SettingsOverlayState::default())
+        // Active HUD display mode (Full / Minimal / Hidden)
+        .insert_resource(HudDisplayState::default())
         // Audio and music settings (master volume and mute state)
         .insert_resource(AudioSettings::default())
         // Dynamic GPU adapter texture quality scaling & resolution cap
@@ -163,6 +166,7 @@ fn main() {
                 universe_switch_button_system,
             ),
         )
+        .add_systems(Update, hud_display_input_system)
         // World animation, celestial dynamics, synchronized physics pipeline & UI updates
         .add_systems(
             Update,
@@ -187,6 +191,7 @@ fn main() {
                     shuttle_input_system,
                     navigation_targeting_system,
                     update_ui_system,
+                    hud_display_update_system,
                     update_orbital_radar_system,
                 )
                     .chain(),
