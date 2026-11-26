@@ -110,6 +110,10 @@ build_linux() {
     mkdir -p "${bundle_dir}/assets"
     cp -rf "${PROJECT_ROOT}/assets/"* "${bundle_dir}/assets/"
 
+    # Bundle Linux .desktop installer for Wayland/X11 taskbar icon & menu shortcut
+    cp -f "${PROJECT_ROOT}/tools/install_desktop.sh" "${bundle_dir}/install_desktop.sh"
+    chmod +x "${bundle_dir}/install_desktop.sh"
+
     local archive="${DIST_DIR}/Space-Explorer-Linux-x86_64.7z"
     compress_7z "${archive}" "${bundle_dir}"
     log_success "Linux release packaging complete!"
@@ -133,9 +137,13 @@ build_windows() {
     local bundle_dir="${DIST_DIR}/Space-Explorer-Windows"
     mkdir -p "${bundle_dir}"
 
-    # Compile for Windows x86_64
+    # Compile for Windows x86_64 (clear RUSTFLAGS so Linux mold/clang flags never leak into MinGW PE linking)
     log_info "Compiling Windows x86_64 release binary..."
-    RUSTC_WRAPPER="" cargo build --release --target x86_64-pc-windows-gnu --target-dir "${TARGET_DIR}/windows"
+    RUSTC_WRAPPER="" \
+    RUSTFLAGS="" \
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="x86_64-w64-mingw32-gcc" \
+    CARGO_TARGET_X86_64_PC_WINDOWS_GNU_AR="x86_64-w64-mingw32-ar" \
+        cargo build --release --target x86_64-pc-windows-gnu --target-dir "${TARGET_DIR}/windows"
 
     log_info "Copying executable and assets into bundle..."
     cp -f "${TARGET_DIR}/windows/x86_64-pc-windows-gnu/release/space_explorer.exe" "${bundle_dir}/space_explorer.exe"

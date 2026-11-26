@@ -171,6 +171,9 @@ jobs:
           mkdir -p "${BUNDLE_DIR}/assets"
           cp -rf assets/* "${BUNDLE_DIR}/assets/"
 
+          cp -f tools/install_desktop.sh "${BUNDLE_DIR}/install_desktop.sh"
+          chmod +x "${BUNDLE_DIR}/install_desktop.sh"
+
           # Standard high-efficiency 7-Zip LZMA2 solid compression
           ARCHIVE_NAME="Space-Explorer-Linux-v${VERSION}.7z"
           7z a -t7z -m0=lzma2 -mx=9 -mmt=on "${ARCHIVE_NAME}" "${BUNDLE_DIR}"

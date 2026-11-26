@@ -4042,6 +4042,7 @@ name = "space_explorer"
 version = "0.6.30"
 dependencies = [
  "bevy",
+ "winit",
 ]
 
 [[package]]

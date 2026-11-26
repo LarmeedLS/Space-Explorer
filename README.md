@@ -69,6 +69,9 @@ sudo pacman -Syu --needed rust clang mold sccache
 # Run unit & physics test suite
 ./run.sh test
 
+# Register Linux desktop entry (titlebar/taskbar icon on Wayland & launcher shortcut)
+./run.sh desktop
+
 # Bump version, update CHANGELOG.md, and interactively commit/push
 ./run.sh version patch   # or minor / major / <X.Y.Z>
 ```
@@ -167,6 +170,7 @@ Space-Explorer/
 ├── assets/
 │   ├── audio/               # Looping soundtrack (scienceclic.ogg)
 │   ├── fonts/               # UI fonts (DejaVu Sans & Mono)
+│   ├── icons/               # Window/taskbar PNG icon & Windows .exe ICO resource
 │   ├── models/              # Spacecraft 3D glTF model (ship.glb)
 │   ├── shaders/             # GPU relativistic starfield shader (starfield.wgsl)
 │   └── textures/planets/    # High-resolution planetary PBR textures & ring maps
@@ -183,6 +187,7 @@ Space-Explorer/
 │   ├── ui.rs                # Cockpit HUD, relativistic gauges, visor & MFD overlay
 │   └── world.rs             # Spacecraft scene assembly, engine plumes & solar lighting
 ├── tools/
+│   ├── install_desktop.sh   # Linux .desktop & Wayland taskbar icon installer
 │   ├── version.sh           # Version bump, CHANGELOG editor & interactive Git release workflow
 │   ├── package.sh           # Standalone Linux/Windows 7z release bundler
 │   ├── compress_textures_ktx2.sh

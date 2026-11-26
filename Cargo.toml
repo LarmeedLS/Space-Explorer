@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 bevy = { version = "0.15", features = ["flac", "jpeg", "ktx2", "zstd", "basis-universal"] }
+winit = { version = "0.30", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bevy = { version = "0.15", features = ["wayland"] }

@@ -19,6 +19,7 @@ use bevy::window::{
     CursorGrabMode, Monitor, MonitorSelection, PresentMode, PrimaryMonitor, PrimaryWindow,
     WindowMode, WindowPosition,
 };
+use bevy::winit::WinitWindows;
 
 use camera::{
     app_exit_system, camera_follow_system, camera_toggle_system, canopy_visor_camera_system,
@@ -73,7 +74,8 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "Relativistic Space Simulator (Phase 4: Relativistic Visual Shaders & Optics)".into(),
+                        title: "Space-Explorer".into(),
+                        name: Some("space-explorer".into()),
                         mode: WindowMode::Windowed,
                         resolution: (1600.0_f32, 900.0_f32).into(),
                         position: WindowPosition::Automatic,
@@ -136,6 +138,7 @@ fn main() {
             Startup,
             (
                 setup_window_cursor,
+                set_window_icon_system,
                 spawn_world,
                 setup_ui,
                 setup_navigation_ui,
@@ -242,6 +245,67 @@ fn setup_window_cursor(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     if let Ok(mut window) = windows.get_single_mut() {
         window.cursor_options.grab_mode = CursorGrabMode::Locked;
         window.cursor_options.visible = false;
+    }
+}
+
+/// Resolves `assets/icons/icon.png` relative to BEVY_ASSET_ROOT, current working directory,
+/// or the executable's parent directory so swapping the icon file works without recompiling.
+fn resolve_window_icon_path() -> Option<std::path::PathBuf> {
+    let rel = std::path::Path::new("assets/icons/icon.png");
+    if let Ok(root) = std::env::var("BEVY_ASSET_ROOT") {
+        let candidate = std::path::Path::new(&root).join(rel);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if rel.is_file() {
+        return Some(rel.to_path_buf());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(rel);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Decodes a PNG image file into raw RGBA8 bytes `(rgba, width, height)` for `winit::window::Icon`.
+fn load_window_icon_rgba(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    let img = bevy::image::Image::from_buffer(
+        &bytes,
+        bevy::image::ImageType::Extension("png"),
+        bevy::image::CompressedImageFormats::NONE,
+        true,
+        bevy::image::ImageSampler::Default,
+        bevy::render::render_asset::RenderAssetUsages::MAIN_WORLD,
+    )
+    .ok()?;
+    let width = img.width();
+    let height = img.height();
+    let rgba = img.try_into_dynamic().ok()?.into_rgba8().into_raw();
+    Some((rgba, width, height))
+}
+
+/// Loads `assets/icons/icon.png` at startup and sets the OS titlebar & taskbar icon (X11 / Windows).
+/// Note: On Wayland, KDE/GNOME matches `Window::name` ("space-explorer") to `space-explorer.desktop`.
+fn set_window_icon_system(winit_windows: NonSend<WinitWindows>) {
+    let Some(icon_path) = resolve_window_icon_path() else {
+        return;
+    };
+    let Some((rgba, width, height)) = load_window_icon_rgba(&icon_path) else {
+        warn!("Failed to decode window icon at {}", icon_path.display());
+        return;
+    };
+    let Ok(icon) = winit::window::Icon::from_rgba(rgba, width, height) else {
+        warn!("Failed to build winit Icon from {}", icon_path.display());
+        return;
+    };
+    for window in winit_windows.windows.values() {
+        window.set_window_icon(Some(icon.clone()));
     }
 }
 
@@ -411,6 +475,46 @@ fn audio_mute_toggle_system(
                 sink.set_volume(audio_settings.master_volume);
                 info!("♫ Soundtrack resumed (Unmuted via [M])");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_window_icon_loader_missing_and_valid_png() {
+        // Missing path must safely return None without panicking
+        assert!(load_window_icon_rgba(std::path::Path::new("assets/icons/does_not_exist.png")).is_none());
+
+        // Minimal valid 2x2 RGBA PNG (10, 200, 255, 255) verifies decode + winit::window::Icon construction
+        let minimal_png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x72, 0xB6, 0x0D, 0x24, 0x00, 0x00, 0x00, 0x15, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0xE4, 0x3A, 0xF1, 0xFF, 0x3F, 0x03, 0x03, 0x03, 0x03, 0x13, 0x88, 0x00,
+            0x61, 0x00, 0x2A, 0x43, 0x02, 0xD4, 0x4D, 0xA8, 0x4E, 0xAA, 0x00, 0x00, 0x00, 0x00,
+            0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let tmp_path = std::env::temp_dir().join("space_explorer_test_icon.png");
+        std::fs::write(&tmp_path, minimal_png).expect("write temp test png");
+
+        let decoded = load_window_icon_rgba(&tmp_path);
+        assert!(decoded.is_some(), "Valid PNG must decode cleanly");
+        let (rgba, w, h) = decoded.unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgba.len(), 16);
+        assert_eq!(&rgba[0..4], &[10, 200, 255, 255]);
+        assert!(winit::window::Icon::from_rgba(rgba, w, h).is_ok());
+
+        // If assets/icons/icon.png is present, validate it as well
+        let project_icon = std::path::Path::new("assets/icons/icon.png");
+        if project_icon.is_file() {
+            let (rgba, w, h) = load_window_icon_rgba(project_icon)
+                .expect("assets/icons/icon.png must decode cleanly");
+            assert!(w > 0 && h > 0 && rgba.len() == (w * h * 4) as usize);
+            assert!(winit::window::Icon::from_rgba(rgba, w, h).is_ok());
         }
     }
 }

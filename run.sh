@@ -133,6 +133,7 @@ print_help() {
     echo -e "  ${CYAN}check${RESET}          Fast syntax, type, and ECS borrow safety check"
     echo -e "  ${CYAN}status${RESET}         Display compiler toolchain and sccache cache statistics"
     echo -e "  ${CYAN}package${RESET}        Build standalone 7z release bundles (linux, windows, or all)"
+    echo -e "  ${CYAN}desktop${RESET}        Install Linux .desktop entry for taskbar/titlebar icon (Wayland/X11)"
     echo -e "  ${CYAN}version${RESET}        Display or bump project version (get, patch, minor, major)"
     echo -e "  ${CYAN}clean${RESET}          Safely clean build artifacts in CARGO_TARGET_DIR"
     echo -e "  ${CYAN}help${RESET}           Show this help information"
@@ -196,22 +197,10 @@ main() {
             clean_target
             exit 0
             ;;
-    esac
-
-    print_banner
-    check_prerequisites
-    configure_optimizations
-
-    case "${command}" in
-        run|release|native)
-            # Default & Run: Single unified maximum-performance release build tailored to the host CPU
-            log_info "Building and launching Space-Explorer (Peak Performance: Release -O3 + ThinLTO + Native CPU)..."
-            RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo run --release
-            ;;
-        build|build-release)
-            log_info "Compiling peak native release binary (-O3, ThinLTO, Native CPU)..."
-            RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo build --release
-            log_success "Build complete! Binary located in ${CARGO_TARGET_DIR:-target}/release/space_explorer"
+        desktop)
+            shift || true
+            bash "${SCRIPT_DIR}/tools/install_desktop.sh" "$@"
+            exit 0
             ;;
         package|dist)
             shift || true
@@ -222,6 +211,26 @@ main() {
             shift || true
             bash "${SCRIPT_DIR}/tools/version.sh" "$@"
             exit 0
+            ;;
+    esac
+
+    print_banner
+    check_prerequisites
+    configure_optimizations
+
+    case "${command}" in
+        run|release|native)
+            if [ ! -f "${XDG_DATA_HOME:-${HOME}/.local/share}/applications/space-explorer.desktop" ]; then
+                log_info "Tip: Run './run.sh desktop' once to register the taskbar/titlebar icon on Linux Wayland."
+            fi
+            # Default & Run: Single unified maximum-performance release build tailored to the host CPU
+            log_info "Building and launching Space-Explorer (Peak Performance: Release -O3 + ThinLTO + Native CPU)..."
+            RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo run --release
+            ;;
+        build|build-release)
+            log_info "Compiling peak native release binary (-O3, ThinLTO, Native CPU)..."
+            RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo build --release
+            log_success "Build complete! Binary located in ${CARGO_TARGET_DIR:-target}/release/space_explorer"
             ;;
         dev)
             log_info "Building and launching Space-Explorer (fast dev profile for quick iteration)..."
