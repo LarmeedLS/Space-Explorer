@@ -105,6 +105,7 @@ Supports both **QWERTY** and **AZERTY** physical keyboard layouts:
 | **Universal Solar Brake** | `Shift + X` | Brakes to 0 m/s in the Solar rest frame |
 | **Pitch & Yaw Steering** | `Mouse` or `Arrow Keys` | Attitude control (yaw steering remains active while landed) |
 | **Roll Steering** | `Q` / `E` (`A` / `E` on AZERTY) | Axial roll rotation |
+| **Bow Floodlights / Searchlight** | `B` | Cycles `Off → Landing Flood (Close) → High Beam (Adaptive Orbital)` |
 
 ### 2. Cruise Control & Autopilot
 | Action | Key / Input | Notes |
@@ -143,7 +144,7 @@ Supports both **QWERTY** and **AZERTY** physical keyboard layouts:
 | **Toggle VSync / Fullscreen** | `F2` / `F11` | Toggles VSync / Borderless Fullscreen |
 | **Texture Quality / Streaming** | `F12` / `Shift + F12` | Cycles 8K/4K/2K textures / toggles dynamic proximity LOD |
 | **Toggle Aberration / Doppler** | `F4` / `F5` | Toggles relativistic aberration / Doppler shift & beaming |
-| **Time Scale (Slow-Mo / Warp)** | `F6` / `F7` (or `[` / `]`), `F8` / `\` resets | Adjusts simulation speed ($0.05\times \to 2.0\times$) |
+| **Time Scale (Slow-Mo / Warp)** | `F6` / `F7` (or `[` / `]`), `F8` / `\` resets | Adjusts simulation speed ($0.005\times \to 5.0\times$) |
 | **Speed of Light Presets / Tune** | `1` (Real $c$), `2` (Demo $c$), `O` / `P` | Switches or continuously tunes $c$ |
 | **Mute Soundtrack / Reset Ship** | `M` / `R` (or `Numpad .`) | Toggles audio mute / resets shuttle & clocks |
 | **Exit / Dismiss Overlay** | `Escape` | Closes MFD menu or exits cleanly |

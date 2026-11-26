@@ -43,6 +43,170 @@ pub struct RunwayLight {
 #[derive(Component)]
 pub struct ShipSceneRoot;
 
+/// Marker component for forward-facing bow floodlights / searchlights mounted on the shuttle
+#[derive(Component)]
+pub struct ShipFloodlight;
+
+/// Marker component for the visible emissive LED lamp strip meshes on the shuttle bow
+#[derive(Component)]
+pub struct ShipFloodlightLed;
+
+/// Marker component for local bow hull reflection PointLights right beside each LED emitter
+#[derive(Component)]
+pub struct ShipFloodlightGlow;
+
+/// Operating mode for the shuttle's forward floodlights / searchlights (Hotkey: B)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+pub enum FlashlightMode {
+    #[default]
+    Off,
+    /// Wide landing floodlight beam (15 km range, 50° cone) for low approaches & night terrain
+    Flood,
+    /// Adaptive planetary orbital searchlight (up to 8,000 km range, 36° cone) lighting dark hemispheres
+    HighBeam,
+}
+
+impl FlashlightMode {
+    pub fn next(&self) -> Self {
+        match self {
+            FlashlightMode::Off => FlashlightMode::Flood,
+            FlashlightMode::Flood => FlashlightMode::HighBeam,
+            FlashlightMode::HighBeam => FlashlightMode::Off,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            FlashlightMode::Off => "OFF",
+            FlashlightMode::Flood => "LANDING FLOOD [CLOSE]",
+            FlashlightMode::HighBeam => "HIGH BEAM [ORBITAL]",
+        }
+    }
+
+    pub fn short_tag(&self) -> Option<&'static str> {
+        match self {
+            FlashlightMode::Off => None,
+            FlashlightMode::Flood => Some("[FLOOD]"),
+            FlashlightMode::HighBeam => Some("[HIGH BEAM]"),
+        }
+    }
+
+    /// Returns `(intensity_lumens, range_m, inner_angle_rad, outer_angle_rad)` per bow lamp.
+    /// In `HighBeam` mode, output dynamically adapts to `target_surface_alt_m` (1 km .. 2,500 km)
+    /// so it vividly illuminates a wide swath of a dark moon/planet from orbit (~2,500 lux) without
+    /// washing out at lower altitudes.
+    pub fn spotlight_params(&self, target_surface_alt_m: f64) -> (f32, f32, f32, f32) {
+        match self {
+            FlashlightMode::Off => (0.0, 1.0, 0.2, 0.4),
+            FlashlightMode::Flood => (
+                6.0e9,
+                15_000.0,
+                26.0_f32.to_radians(),
+                50.0_f32.to_radians(),
+            ),
+            FlashlightMode::HighBeam => {
+                let d_eff = (target_surface_alt_m.clamp(1_000.0, 2_500_000.0)) as f32;
+                // Two lamps together deliver ~2,500 lux at distance d_eff (I = 1250 * 4 * pi * d^2 per lamp)
+                let intensity = 1_250.0 * 4.0 * std::f32::consts::PI * d_eff * d_eff;
+                let range = (d_eff * 3.0).clamp(30_000.0, 8_000_000.0);
+                (
+                    intensity,
+                    range,
+                    18.0_f32.to_radians(),
+                    36.0_f32.to_radians(),
+                )
+            }
+        }
+    }
+
+    /// HDR emissive brightness multiplier for the visible bow LED lamp strips
+    pub fn led_brightness(&self) -> f32 {
+        match self {
+            FlashlightMode::Off => FLOODLIGHT_LED_OFF_BRIGHTNESS,
+            FlashlightMode::Flood => FLOODLIGHT_LED_FLOOD_BRIGHTNESS,
+            FlashlightMode::HighBeam => FLOODLIGHT_LED_HIGH_BEAM_BRIGHTNESS,
+        }
+    }
+
+    /// Local hull reflection PointLight intensity right beside each bow LED lamp
+    pub fn hull_glow_intensity(&self) -> f32 {
+        match self {
+            FlashlightMode::Off => 0.0,
+            FlashlightMode::Flood => FLOODLIGHT_HULL_GLOW_FLOOD_INTENSITY,
+            FlashlightMode::HighBeam => FLOODLIGHT_HULL_GLOW_HIGH_BEAM_INTENSITY,
+        }
+    }
+}
+
+/// Resource tracking the shuttle's active bow floodlight / searchlight mode
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ShipFlashlightState {
+    pub mode: FlashlightMode,
+}
+
+/// Listens for [B] to cycle ship floodlights: Off -> Landing Flood -> High Beam -> Off
+/// Ignored while the simulation is paused.
+pub fn ship_flashlight_input_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    pause: Option<Res<SimulationPause>>,
+    mut state: ResMut<ShipFlashlightState>,
+) {
+    if pause.as_ref().map_or(false, |p| p.0) {
+        return;
+    }
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        state.mode = state.mode.next();
+    }
+}
+
+/// Synchronizes bow SpotLights, visible LED strip emissive glow, and local bow hull PointLights
+pub fn ship_flashlight_update_system(
+    state: Res<ShipFlashlightState>,
+    nav: Option<Res<crate::navigation::NavigationComputer>>,
+    mut lights_query: Query<&mut SpotLight, With<ShipFloodlight>>,
+    mut glow_query: Query<&mut PointLight, With<ShipFloodlightGlow>>,
+    led_query: Query<&MeshMaterial3d<StandardMaterial>, With<ShipFloodlightLed>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+) {
+    let surface_alt = nav
+        .as_ref()
+        .and_then(|n| n.closest_altitude_m.or(n.altitude_m))
+        .unwrap_or(50_000.0);
+
+    let (intensity, range, inner_angle, outer_angle) = state.mode.spotlight_params(surface_alt);
+    for mut spot in lights_query.iter_mut() {
+        spot.intensity = intensity;
+        spot.range = range;
+        spot.inner_angle = inner_angle;
+        spot.outer_angle = outer_angle;
+    }
+
+    let glow_intensity = state.mode.hull_glow_intensity();
+    for mut glow in glow_query.iter_mut() {
+        glow.intensity = glow_intensity;
+    }
+
+    if let Some(ref mut mats) = materials {
+        let led_br = state.mode.led_brightness();
+        let emissive = LinearRgba::rgb(
+            FLOODLIGHT_LED_COLOR.red * led_br,
+            FLOODLIGHT_LED_COLOR.green * led_br,
+            FLOODLIGHT_LED_COLOR.blue * led_br,
+        );
+        let base_color = if led_br > 0.0 {
+            Color::srgb(0.95, 0.98, 1.0)
+        } else {
+            Color::srgb(0.08, 0.10, 0.14) // Dark unlit headlamp glass when OFF
+        };
+        for mat_handle in led_query.iter() {
+            if let Some(mat) = mats.get_mut(&mat_handle.0) {
+                mat.emissive = emissive;
+                mat.base_color = base_color;
+            }
+        }
+    }
+}
+
 pub fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -118,6 +282,39 @@ pub const RIGHT_ENGINE_SLAT_POSITIONS: [[f32; 3]; 4] = [
     [ 18.45, -3.82, 79.1],  // Right Slat 3 (Lower-mid)
     [ 18.45, -5.20, 79.1],  // Right Slat 4 (Bottom)
 ];
+
+// ==============================================================================
+// SHIP BOW FLOODLIGHT LED CONFIGURATION (Federal Corvette - 2 Bow Headlamps)
+// ==============================================================================
+// 1. Dimensions of each visible LED lamp strip [Width (X), Height (Y), Depth (Z)]:
+pub const FLOODLIGHT_LED_SIZE: Vec3 = Vec3::new(5.1, 0.85, 0.5);
+
+// 2. Positions [X, Y, Z] for Left and Right bow LED strips & SpotLight origins (-Z is forward toward the nose, +Y is up, ±X is starboard/port):
+pub const FLOODLIGHT_LED_POSITIONS: [[f32; 3]; 2] = [
+    [-7.22, -1.86, -83.51], // Left Bow LED
+    [ 7.22, -1.86, -83.51], // Right Bow LED
+];
+
+// 3. LED Mesh Rotations in DEGREES [Pitch (X), Yaw (Y), Roll (Z)] for Left and Right LEDs:
+//    - Pitch (X): tilts up/down vertically
+//    - Yaw   (Y): angles sideways horizontally along the tapered bow (mirror sign for Left vs Right)
+//    - Roll  (Z): tilts diagonally sideways in the front plane (mirror sign for Left vs Right)
+//    (Only rotates the visible LED mesh; the SpotLight beam continues aiming straight forward.)
+pub const FLOODLIGHT_LED_ROTATIONS_DEG: [[f32; 3]; 2] = [
+    [0.0,  45.0,  0.0], // Left Bow LED  [Pitch X, Yaw Y, Roll Z]
+    [0.0,  -45.0,  0.0], // Right Bow LED [Pitch X, Yaw Y, Roll Z]
+];
+
+// 4. LED Emissive Color & HDR Brightness (drives visible LED glow & bloom):
+pub const FLOODLIGHT_LED_COLOR: LinearRgba = LinearRgba::rgb(0.92, 0.96, 1.0);
+pub const FLOODLIGHT_LED_OFF_BRIGHTNESS: f32 = 0.1;
+pub const FLOODLIGHT_LED_FLOOD_BRIGHTNESS: f32 = 12.0;      // Crisp visible LED glow in Flood mode
+pub const FLOODLIGHT_LED_HIGH_BEAM_BRIGHTNESS: f32 = 38.0;  // Intense HDR bloom emitter in High Beam
+
+// 5. Local bow hull reflection PointLight intensity (illuminates nearby hull around each LED):
+pub const FLOODLIGHT_HULL_GLOW_FLOOD_INTENSITY: f32 = 45_000.0;
+pub const FLOODLIGHT_HULL_GLOW_HIGH_BEAM_INTENSITY: f32 = 140_000.0;
+pub const FLOODLIGHT_HULL_GLOW_RANGE: f32 = 40.0;
 
 fn spawn_shuttle(
     commands: &mut Commands,
@@ -231,6 +428,68 @@ fn spawn_shuttle(
             },
             Transform::from_xyz(18.45, -3.1, 79.2),
         ));
+
+        // 4. BOW FLOODLIGHTS / SEARCHLIGHTS + VISIBLE LED LAMPS (Toggled via [B])
+        // Mounted at FLOODLIGHT_LED_POSITIONS, pitched -5 deg down to illuminate landing terrain ahead.
+        let floodlight_led_mesh = meshes.add(Cuboid::new(
+            FLOODLIGHT_LED_SIZE.x,
+            FLOODLIGHT_LED_SIZE.y,
+            FLOODLIGHT_LED_SIZE.z,
+        ));
+        let floodlight_led_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.08, 0.10, 0.14),
+            emissive: LinearRgba::BLACK,
+            perceptual_roughness: 0.2,
+            metallic: 0.1,
+            ..default()
+        });
+        let floodlight_rot = Quat::from_rotation_x(-5.0_f32.to_radians());
+        for (&[x, y, z], &[rx, ry, rz]) in FLOODLIGHT_LED_POSITIONS
+            .iter()
+            .zip(FLOODLIGHT_LED_ROTATIONS_DEG.iter())
+        {
+            let led_rot = Quat::from_euler(
+                EulerRot::YXZ,
+                ry.to_radians(),
+                rx.to_radians(),
+                rz.to_radians(),
+            );
+            // Visible LED emitter strip mesh
+            parent.spawn((
+                ShipFloodlightLed,
+                Mesh3d(floodlight_led_mesh.clone()),
+                MeshMaterial3d(floodlight_led_material.clone()),
+                Transform::from_xyz(x, y, z).with_rotation(led_rot),
+            ));
+
+            // Forward SpotLight beam
+            parent.spawn((
+                ShipFloodlight,
+                SpotLight {
+                    color: Color::srgb(0.92, 0.96, 1.0),
+                    intensity: 0.0, // Off by default
+                    range: 15_000.0,
+                    inner_angle: 26.0_f32.to_radians(),
+                    outer_angle: 50.0_f32.to_radians(),
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(x, y, z - 0.6).with_rotation(floodlight_rot),
+            ));
+
+            // Subtle local bow hull reflection PointLight right in front of the LED lens
+            parent.spawn((
+                ShipFloodlightGlow,
+                PointLight {
+                    color: Color::srgb(0.92, 0.96, 1.0),
+                    intensity: 0.0, // Off by default
+                    range: FLOODLIGHT_HULL_GLOW_RANGE,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(x, y + 0.5, z - 1.5),
+            ));
+        }
     });
 }
 
@@ -1094,5 +1353,109 @@ mod tests {
 
         let s_light = app.world().get::<DirectionalLight>(searchlight_ent).unwrap();
         assert_eq!(s_light.illuminance, 0.0, "Searchlight illuminance must be 0.0 lux at beta = 0.15");
+    }
+
+    #[test]
+    fn test_ship_flashlight_cycling_and_spotlight_updates() {
+        let mut app = App::new();
+        app.insert_resource(ShipFlashlightState::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        let mut nav = crate::navigation::NavigationComputer::default();
+        nav.closest_altitude_m = Some(500_000.0); // 500 km lunar/planetary orbit
+        app.insert_resource(nav);
+
+        let mut mats = Assets::<StandardMaterial>::default();
+        let led_mat = mats.add(StandardMaterial::default());
+        app.insert_resource(mats);
+
+        let lamp_ent = app.world_mut().spawn((
+            ShipFloodlight,
+            SpotLight {
+                intensity: 0.0,
+                shadows_enabled: false,
+                ..default()
+            },
+        )).id();
+        let glow_ent = app.world_mut().spawn((
+            ShipFloodlightGlow,
+            PointLight {
+                intensity: 0.0,
+                shadows_enabled: false,
+                ..default()
+            },
+        )).id();
+        app.world_mut().spawn((
+            ShipFloodlightLed,
+            MeshMaterial3d(led_mat.clone()),
+        ));
+
+        app.add_systems(Update, (ship_flashlight_input_system, ship_flashlight_update_system).chain());
+
+        let expected_off_emissive = LinearRgba::rgb(
+            FLOODLIGHT_LED_COLOR.red * FLOODLIGHT_LED_OFF_BRIGHTNESS,
+            FLOODLIGHT_LED_COLOR.green * FLOODLIGHT_LED_OFF_BRIGHTNESS,
+            FLOODLIGHT_LED_COLOR.blue * FLOODLIGHT_LED_OFF_BRIGHTNESS,
+        );
+
+        // 1. Default Off -> intensity 0, LED at standby OFF brightness
+        app.update();
+        assert_eq!(app.world().resource::<ShipFlashlightState>().mode, FlashlightMode::Off);
+        assert_eq!(app.world().get::<SpotLight>(lamp_ent).unwrap().intensity, 0.0);
+        assert_eq!(app.world().get::<PointLight>(glow_ent).unwrap().intensity, 0.0);
+        assert_eq!(app.world().resource::<Assets<StandardMaterial>>().get(&led_mat).unwrap().emissive, expected_off_emissive);
+
+        // 2. Press B -> Landing Flood (15 km, wide cone, glowing LEDs + hull reflection)
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyB);
+        app.update();
+        assert_eq!(app.world().resource::<ShipFlashlightState>().mode, FlashlightMode::Flood);
+        let flood_spot = app.world().get::<SpotLight>(lamp_ent).unwrap();
+        assert!(flood_spot.intensity > 1e9, "Flood mode must emit strong landing lumens");
+        assert_eq!(flood_spot.range, 15_000.0);
+        assert!(app.world().get::<PointLight>(glow_ent).unwrap().intensity > 10_000.0);
+        let flood_led_r = app.world().resource::<Assets<StandardMaterial>>().get(&led_mat).unwrap().emissive.red;
+        assert!(flood_led_r > 5.0, "Flood LED emissive must be brightly lit");
+
+        // 3. Press B again -> Adaptive Orbital High Beam (illuminates dark side from 500 km orbit!)
+        let flood_intensity = flood_spot.intensity;
+        let flood_angle = flood_spot.outer_angle;
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.release(KeyCode::KeyB);
+            kb.press(KeyCode::KeyB);
+        }
+        app.update();
+        assert_eq!(app.world().resource::<ShipFlashlightState>().mode, FlashlightMode::HighBeam);
+        let high_spot = app.world().get::<SpotLight>(lamp_ent).unwrap();
+        assert!(high_spot.intensity > flood_intensity * 1000.0, "Orbital high beam must scale up for 500 km dark-side illumination");
+        assert!(high_spot.outer_angle < flood_angle, "High beam cone must be tighter than landing flood");
+        assert!(high_spot.range >= 1_500_000.0, "Orbital high beam range must reach well beyond 500 km");
+        let high_led_r = app.world().resource::<Assets<StandardMaterial>>().get(&led_mat).unwrap().emissive.red;
+        assert!(high_led_r > flood_led_r * 2.0, "High beam LED emissive must shine brighter than Flood");
+
+        // 4. Press B again -> Off
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.release(KeyCode::KeyB);
+            kb.press(KeyCode::KeyB);
+        }
+        app.update();
+        assert_eq!(app.world().resource::<ShipFlashlightState>().mode, FlashlightMode::Off);
+        assert_eq!(app.world().get::<SpotLight>(lamp_ent).unwrap().intensity, 0.0);
+        assert_eq!(app.world().get::<PointLight>(glow_ent).unwrap().intensity, 0.0);
+        assert_eq!(app.world().resource::<Assets<StandardMaterial>>().get(&led_mat).unwrap().emissive, expected_off_emissive);
+
+        // 5. While paused, pressing B must NOT toggle the beam mode
+        app.insert_resource(SimulationPause(true));
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.release(KeyCode::KeyB);
+            kb.press(KeyCode::KeyB);
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<ShipFlashlightState>().mode,
+            FlashlightMode::Off,
+            "Pressing B while paused must not change beam mode"
+        );
     }
 }

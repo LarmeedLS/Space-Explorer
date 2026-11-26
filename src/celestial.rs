@@ -4733,7 +4733,7 @@ pub fn axial_rotation_system(
     if pause.0 {
         return;
     }
-    let dt = time.delta_secs_f64() * config.time_scale;
+    let dt = time.delta_secs_f64().min(0.05) * config.time_scale;
     if dt == 0.0 {
         return;
     }

@@ -44,7 +44,9 @@ pub fn shuttle_time_system(
     if pause.0 {
         return;
     }
-    let dt_frame = time.delta_secs() as f64;
+    // Use the exact same f64 clamped dt_frame as shuttle_input_system so celestial orbits
+    // and shuttle motion stay bit-for-bit synchronized even during frame hitches.
+    let dt_frame = time.delta_secs_f64().min(0.05);
     let d_tau = dt_frame * config.time_scale;
     for mut rel_state in query.iter_mut() {
         rel_state.proper_time += d_tau;
@@ -461,7 +463,9 @@ pub fn shuttle_input_system(
     mut camera_query: Query<&mut SpaceCamera>,
     loading_tracker: Option<Res<crate::ui::StartupLoadingTracker>>,
 ) {
-    let window = windows.single();
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
     let is_cursor_locked = window.cursor_options.grab_mode != bevy::window::CursorGrabMode::None;
 
     // Suppress pilot steering inputs while the startup loading screen is active
@@ -471,7 +475,7 @@ pub fn shuttle_input_system(
     let dt_frame = time.delta_secs_f64().min(0.05);
     // In slow-motion, manual steering and attitude dynamics scale proportionally with simulation speed
     // so that the entire simulation (autopilots, ship rotation, orbital physics, flight velocity) moves in unified slow-motion.
-    let sim_time_factor = (config.time_scale as f32).clamp(0.001, 2.0);
+    let sim_time_factor = (config.time_scale as f32).clamp(0.001, 5.0);
     let dt_f32 = (time.delta_secs() * sim_time_factor).min(0.05);
 
     let ctrl_pressed = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
@@ -516,18 +520,14 @@ pub fn shuttle_input_system(
         }
     }
 
-    // 1. Check Free-Look (holding Alt, pressing F3, or when Paused)
-    // Note: When permanent free-look is enabled with F3, pressing Alt disables it.
+    // 1. Check Free-Look (holding Alt temporarily, permanent toggle via F3 / Numpad, or when Paused)
+    // Permanent free-look (F3 / Numpad) is NOT cancelled by pressing Alt, so OS shortcuts like Alt+Tab
+    // never accidentally reset the camera back to center. Press F3 or Numpad 5 to recenter.
     let alt_pressed = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);
-    let alt_just_pressed = keyboard.just_pressed(KeyCode::AltLeft) || keyboard.just_pressed(KeyCode::AltRight);
 
     for mut cam in camera_query.iter_mut() {
         if keyboard.just_pressed(KeyCode::F3) {
             cam.free_look_active = !cam.free_look_active;
-        }
-        // If permanent free cam is enabled with F3, pressing Alt disables it
-        if cam.free_look_active && alt_just_pressed {
-            cam.free_look_active = false;
         }
     }
 
@@ -4513,5 +4513,195 @@ mod tests {
                 alt
             );
         }
+    }
+
+    #[test]
+    fn test_time_scale_and_pause_transitions_zero_lunar_altitude_jump() {
+        let mut app = App::new();
+        let c = 299_792_458.0;
+        app.insert_resource(RelativisticConfig { c, time_scale: 1.0, is_demo_mode: false });
+        app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+        app.insert_resource(SimulationPause(false));
+        app.insert_resource(crate::navigation::NavigationComputer::default());
+        app.insert_resource(crate::celestial::CanopyVisorState::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.add_event::<bevy::input::mouse::MouseMotion>();
+        app.add_event::<bevy::input::mouse::MouseWheel>();
+        app.init_resource::<Time>();
+
+        app.world_mut().spawn((Window::default(), bevy::window::PrimaryWindow));
+        app.world_mut().spawn((SpaceCamera::default(), Camera::default(), Transform::default(), GlobalTransform::default()));
+
+        let sol_ent = app.world_mut().spawn((
+            UniversalPosition(DVec3::ZERO),
+            crate::celestial::CelestialBody { physical_radius: 696_340_000.0, mass_kg: 0.0 },
+            Transform::IDENTITY,
+        )).id();
+
+        let earth_orbit = crate::celestial::KeplerOrbit::circular(Some(sol_ent), 149_597_870_700.0, 0.0, 31_558_149.0, 0.0);
+        let (e_pos, e_vel) = earth_orbit.evaluate_state_at_time(0.0);
+        let earth_ent = app.world_mut().spawn((
+            UniversalPosition(e_pos),
+            crate::celestial::CelestialBody { physical_radius: 6_371_000.0, mass_kg: 0.0 },
+            crate::celestial::BodyVelocity(e_vel),
+            earth_orbit,
+            Transform::IDENTITY,
+        )).id();
+
+        let moon_radius = 1_737_400.0;
+        let moon_orbit = crate::celestial::KeplerOrbit::circular(Some(earth_ent), 384_400_000.0, 0.0, 2_360_585.0, 0.0);
+        let (m_pos, m_vel) = moon_orbit.evaluate_state_at_time(0.0);
+        let moon_init_pos = e_pos + m_pos;
+        let moon_init_vel = e_vel + m_vel;
+        let moon_ent = app.world_mut().spawn((
+            UniversalPosition(moon_init_pos),
+            crate::celestial::CelestialBody { physical_radius: moon_radius, mass_kg: 0.0 },
+            crate::celestial::BodyVelocity(moon_init_vel),
+            moon_orbit,
+            crate::celestial::SatelliteOrbit,
+            Transform::IDENTITY,
+        )).id();
+
+        let hover_alt = 1_600.0;
+        let mut rel = RelativisticState::default();
+        rel.rapidity = crate::relativity::rapidity_from_velocity(moon_init_vel, c);
+        rel.update_from_rapidity(c);
+
+        let shuttle_ent = app.world_mut().spawn((
+            Shuttle::default(),
+            rel,
+            UniversalPosition(moon_init_pos + DVec3::new(0.0, 0.0, moon_radius + hover_alt)),
+            Transform::IDENTITY,
+        )).id();
+
+        app.add_systems(
+            Update,
+            (
+                pause_toggle_system,
+                crate::relativity::relativistic_config_system,
+                shuttle_time_system,
+                crate::celestial::planet_orbit_system,
+                crate::celestial::satellite_orbit_system,
+                shuttle_input_system,
+            ).chain(),
+        );
+
+        let get_alt = |world: &World| -> f64 {
+            let s = world.get::<UniversalPosition>(shuttle_ent).unwrap().0;
+            let m = world.get::<UniversalPosition>(moon_ent).unwrap().0;
+            (s - m).length() - moon_radius
+        };
+
+        // Frame 1: normal 1.0x
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+        let alt_1 = get_alt(app.world());
+
+        // Frame 2: press F7 to jump to 2.0x -> must NOT cause an orbital desync jump!
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::F7);
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+        let alt_2 = get_alt(app.world());
+        assert!(
+            (alt_2 - alt_1).abs() < 0.05,
+            "Changing time_scale with F7 must not cause an orbital altitude jump: alt1={}, alt2={}",
+            alt_1, alt_2
+        );
+
+        // Frame 3: press F1 to pause -> must NOT cause an altitude jump!
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.release(KeyCode::F7);
+            kb.press(KeyCode::F1);
+        }
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+        let alt_3 = get_alt(app.world());
+        assert!(
+            (alt_3 - alt_2).abs() < 1e-6,
+            "Pausing with F1 must freeze altitude with zero jump: alt2={}, alt3={}",
+            alt_2, alt_3
+        );
+    }
+
+    #[test]
+    fn test_shuttle_input_no_panic_when_window_closed() {
+        let mut app = App::new();
+        app.insert_resource(RelativisticConfig::default());
+        app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+        app.insert_resource(SimulationPause(false));
+        app.insert_resource(crate::navigation::NavigationComputer::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.add_event::<bevy::input::mouse::MouseMotion>();
+        app.add_event::<bevy::input::mouse::MouseWheel>();
+        app.init_resource::<Time>();
+
+        // Intentionally spawn NO Window entity (simulating closing the window via 'X' or Alt+F4)
+        app.world_mut().spawn((SpaceCamera::default(), Camera::default(), Transform::default(), GlobalTransform::default()));
+        app.world_mut().spawn((Shuttle::default(), RelativisticState::default(), UniversalPosition::default(), Transform::default()));
+
+        app.add_systems(Update, shuttle_input_system);
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update(); // Must return cleanly without panicking
+    }
+
+    #[test]
+    fn test_alt_tab_preserves_permanent_free_look_camera() {
+        let mut app = App::new();
+        app.insert_resource(RelativisticConfig::default());
+        app.insert_resource(crate::relativity::RelativisticOpticsConfig::default());
+        app.insert_resource(SimulationPause(false));
+        app.insert_resource(crate::navigation::NavigationComputer::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.add_event::<bevy::input::mouse::MouseMotion>();
+        app.add_event::<bevy::input::mouse::MouseWheel>();
+        app.init_resource::<Time>();
+
+        app.world_mut().spawn((Window::default(), bevy::window::PrimaryWindow));
+        let mut cam = SpaceCamera::default();
+        cam.free_look_active = true;
+        cam.target_look_yaw = 1.25;
+        cam.target_look_pitch = -0.35;
+        let cam_ent = app.world_mut().spawn((cam, Camera::default(), Transform::default(), GlobalTransform::default())).id();
+        app.world_mut().spawn((Shuttle::default(), RelativisticState::default(), UniversalPosition::default(), Transform::default()));
+
+        app.add_systems(Update, shuttle_input_system);
+
+        // Simulate pressing Alt+Tab (Alt pressed first, then Tab, then released after window switch)
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.press(KeyCode::AltLeft);
+        }
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.press(KeyCode::Tab);
+        }
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+        app.update();
+
+        {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.release(KeyCode::AltLeft);
+            kb.release(KeyCode::Tab);
+        }
+        for _ in 0..10 {
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(16));
+            app.update();
+        }
+
+        let cam_after = app.world().get::<SpaceCamera>(cam_ent).unwrap();
+        assert!(cam_after.free_look_active, "Alt+Tab must NOT disable permanent free-look mode");
+        assert!(
+            (cam_after.target_look_yaw - 1.25).abs() < 1e-4 && (cam_after.target_look_pitch - (-0.35)).abs() < 1e-4,
+            "Alt+Tab must NOT reset camera orbit angles: yaw={}, pitch={}",
+            cam_after.target_look_yaw,
+            cam_after.target_look_pitch
+        );
     }
 }

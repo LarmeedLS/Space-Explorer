@@ -123,6 +123,10 @@ pub struct AberrationConeText;
 #[derive(Component)]
 pub struct VisorStatusText;
 
+/// Text status readout for the active Bow Floodlights / Searchlights in Full HUD mode
+#[derive(Component)]
+pub struct FlashlightStatusText;
+
 /// Fullscreen Screen-Space Visor Tint Overlay
 #[derive(Component)]
 pub struct VisorScreenOverlay;
@@ -402,7 +406,7 @@ pub fn setup_ui(
 
                     col.spawn((
                         Text::new(
-                            "FLIGHT & ATTITUDE:\n  [↑ / ↓] / Mouse         Pitch Down / Up\n  [← / →] / Mouse         Yaw Port / Starboard\n  [A / E]                 Roll Port / Starboard\n  [Z / Left-Click]        Main Plasma Thrusters\n  [S / Right-Click]       Reverse Retro-Thrusters\n  [Q / D]                 Lateral Strafe Port/Starboard\n  [Shift]                 Afterburner Boost Thruster\n  [X]                     Emergency Retro-Brake\n  [W]                     Toggle SAS Attitude Assist\n  [R / Num .]             Reset Ship to Runway\n\nTARGETING, AUTOPILOT & RADAR:\n  [T / Y]                 Cycle Target / Lock Nearest\n  [G / MMB]               Point & Select Target (Shift+G Clear)\n  [F]                     Auto-Aim Target Align\n  [H]                     Sci-Fi Warp Autopilot (Instant Drop)\n  [L]                     Lorentz Autopilot (Midcourse Flip)\n  [N]                     Toggle Orbital Radar Map (Shift+N Mode)\n\nOPTICS, HUD, TIME & SYSTEM:\n  [I / Shift+I]           Cycle HUD (Full/Minimal/Hide) / Hide UI\n  [U / F10]               Switch Universe (Demo ↔ 1:1 Solar System)\n  [K]                     Canopy Visor (Clear/Pol/H-α)\n  [M]                     Mute\n  [F1 / Return]           Pause\n  [F2]                    VSync\n  [Alt / F3]              Free-Look\n  [Num 8/2/4/6/5]         Numpad Look (8/2/4/6, 5 Center)\n  [F4 / F5]               Toggle Aberration / Doppler\n  [F6 / F7 / F8]          Slow-Mo / Time-Warp / Reset\n  [F9]                    Info and Controls Menu\n  [F11]                   Toggle Fullscreen (Borderless / Windowed)\n  [F12 / Shift+F12]       Texture Profile (8K/4K/2K) / Toggle Dynamic Streaming\n  [O / P]                 Adjust Light Constant c\n  [V] • [Scroll]          Camera Mode • Zoom\n  [Tab]                   Mouse Locking"
+                            "FLIGHT & ATTITUDE:\n  [↑ / ↓] / Mouse         Pitch Down / Up\n  [← / →] / Mouse         Yaw Port / Starboard\n  [A / E]                 Roll Port / Starboard\n  [Z / Left-Click]        Main Plasma Thrusters\n  [S / Right-Click]       Reverse Retro-Thrusters\n  [Q / D]                 Lateral Strafe Port/Starboard\n  [Shift]                 Afterburner Boost Thruster\n  [X]                     Emergency Retro-Brake\n  [W]                     Toggle SAS Attitude Assist\n  [B]                     Bow Floodlights (Off/Flood/High)\n  [R / Num .]             Reset Ship to Runway\n\nTARGETING, AUTOPILOT & RADAR:\n  [T / Y]                 Cycle Target / Lock Nearest\n  [G / MMB]               Point & Select Target (Shift+G Clear)\n  [F]                     Auto-Aim Target Align\n  [H]                     Sci-Fi Warp Autopilot (Instant Drop)\n  [L]                     Lorentz Autopilot (Midcourse Flip)\n  [N]                     Toggle Orbital Radar Map (Shift+N Mode)\n\nOPTICS, HUD, TIME & SYSTEM:\n  [I / Shift+I]           Cycle HUD (Full/Minimal/Hide) / Hide UI\n  [U / F10]               Switch Universe (Demo ↔ 1:1 Solar System)\n  [K]                     Canopy Visor (Clear/Pol/H-α)\n  [M]                     Mute\n  [F1 / Return]           Pause\n  [F2]                    VSync\n  [Alt / F3]              Free-Look\n  [Num 8/2/4/6/5]         Numpad Look (8/2/4/6, 5 Center)\n  [F4 / F5]               Toggle Aberration / Doppler\n  [F6 / F7 / F8]          Slow-Mo / Time-Warp / Reset (0.005×-5×)\n  [F9]                    Info and Controls Menu\n  [F11]                   Toggle Fullscreen (Borderless / Windowed)\n  [F12 / Shift+F12]       Texture Profile (8K/4K/2K) / Toggle Dynamic Streaming\n  [O / P]                 Adjust Light Constant c\n  [V] • [Scroll]          Camera Mode • Zoom\n  [Tab]                   Mouse Locking"
                         ),
                         TextFont {
                             font: font_mono.clone(),
@@ -814,6 +818,17 @@ pub fn setup_ui(
                             },
                             TextColor(Color::srgb(0.3, 0.85, 1.0)),
                         ));
+
+                        panel.spawn((
+                            FlashlightStatusText,
+                            Text::new("BOW FLOODLIGHTS: [OFF (B to cycle)]"),
+                            TextFont {
+                                font: font_sans.clone(),
+                                font_size: 11.5,
+                                ..default()
+                            },
+                            TextColor(Color::srgba(0.55, 0.70, 0.85, 0.85)),
+                        ));
                     });
 
                 // Solar System Orbital Radar Map (Docked in left column, flows dynamically below Avionics)
@@ -1151,7 +1166,7 @@ pub fn setup_ui(
             .with_children(|bar| {
                 bar.spawn((
                     Text::new(
-                        "[Z/L-Click] Thrust • [S/R-Click] Retro • [T/Y/G] Target • [F] Aim • [H] Warp AP • [L] Lorentz AP • [N] Radar • [I] HUD • [Shift+I] Hide UI • [K] Visor • [M] Mute • [W] SAS • [R] Reset • [U] Universe • [F1] Pause • [F4] Aberr • [F5] Doppler • [F6-F8] Time • [F9] Menu • [F11] Fullscreen • [F12] Quality",
+                        "[Z/L-Click] Thrust • [S/R-Click] Retro • [T/Y/G] Target • [F] Aim • [H] Warp AP • [L] Lorentz AP • [N] Radar • [B] Lights • [I] HUD • [K] Visor • [M] Mute • [W] SAS • [R] Reset • [U] Universe • [F1] Pause • [F4] Aberr • [F5] Doppler • [F6-F8] Time • [F9] Menu • [F11] Fullscreen • [F12] Quality",
                     ),
                     TextFont {
                         font: font_sans.clone(),
@@ -1526,10 +1541,12 @@ pub fn update_ui_system(
             "1.00x [REST] (F5)".to_string()
         };
 
-        let time_scale_str = if (config.time_scale - 1.0).abs() < 0.01 {
+        let time_scale_str = if (config.time_scale - 1.0).abs() < 0.001 {
             "1.00x (F6/F7)".to_string()
+        } else if config.time_scale < 1.0 {
+            format!("{} [SLOW-MO] (F6/F7/F8)", format_time_scale(config.time_scale))
         } else {
-            format!("{:.2}x [SLOW-MO] (F6/F7/F8)", config.time_scale)
+            format!("{} [FAST-FWD] (F6/F7/F8)", format_time_scale(config.time_scale))
         };
 
         **text = format!(
@@ -2063,6 +2080,21 @@ pub fn canopy_visor_ui_system(
     }
 }
 
+/// Real-time updates for Bow Floodlights / Searchlights HUD status line in Full HUD mode
+pub fn ship_flashlight_ui_system(
+    flashlight: Res<crate::world::ShipFlashlightState>,
+    mut text_query: Query<(&mut Text, &mut TextColor), With<FlashlightStatusText>>,
+) {
+    for (mut text, mut color) in text_query.iter_mut() {
+        **text = format!("BOW FLOODLIGHTS: [{} (B to cycle)]", flashlight.mode.label());
+        *color = match flashlight.mode {
+            crate::world::FlashlightMode::Off => TextColor(Color::srgba(0.55, 0.70, 0.85, 0.85)),
+            crate::world::FlashlightMode::Flood => TextColor(Color::srgb(0.45, 0.95, 1.0)),
+            crate::world::FlashlightMode::HighBeam => TextColor(Color::srgb(1.0, 0.95, 0.55)),
+        };
+    }
+}
+
 /// Listens for [I] (cycle Full -> Minimal -> Hidden) and [Shift+I] (instant toggle Hidden)
 pub fn hud_display_input_system(
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -2086,6 +2118,7 @@ pub fn hud_display_update_system(
     pause: Res<SimulationPause>,
     fps_tracker: Res<FpsTracker>,
     nav: Res<crate::navigation::NavigationComputer>,
+    flashlight_state: Option<Res<crate::world::ShipFlashlightState>>,
     mut full_hud_query: Query<&mut Node, (With<FullHudElement>, Without<MinimalHudRoot>, Without<MinimalTargetBox>, Without<StartupCreditsToast>)>,
     mut minimal_root_query: Query<&mut Node, (With<MinimalHudRoot>, Without<FullHudElement>, Without<MinimalTargetBox>, Without<StartupCreditsToast>)>,
     mut minimal_target_box_query: Query<&mut Node, (With<MinimalTargetBox>, Without<FullHudElement>, Without<MinimalHudRoot>, Without<StartupCreditsToast>)>,
@@ -2167,11 +2200,14 @@ pub fn hud_display_update_system(
     } else if shuttle.braking_active {
         status_tags.push("[BRAKE]".to_string());
     }
-    if (config.time_scale - 1.0).abs() >= 0.01 {
-        status_tags.push(format!("[{:.2}×]", config.time_scale));
+    if (config.time_scale - 1.0).abs() >= 0.001 {
+        status_tags.push(format!("[{}]", format_time_scale(config.time_scale)));
     }
     if !shuttle.flight_assist {
         status_tags.push("[SAS OFF]".to_string());
+    }
+    if let Some(tag) = flashlight_state.as_ref().and_then(|f| f.mode.short_tag()) {
+        status_tags.push(tag.to_string());
     }
 
     let mut second_line_parts: Vec<String> = Vec::new();
@@ -2278,7 +2314,11 @@ pub fn update_settings_overlay_system(
     pause: Res<SimulationPause>,
     nav: Res<crate::navigation::NavigationComputer>,
     audio_settings: Res<crate::AudioSettings>,
-    (hud_state, texture_quality): (Option<Res<HudDisplayState>>, Option<Res<crate::celestial::TextureQualityConfig>>),
+    (hud_state, flashlight_state, texture_quality): (
+        Option<Res<HudDisplayState>>,
+        Option<Res<crate::world::ShipFlashlightState>>,
+        Option<Res<crate::celestial::TextureQualityConfig>>,
+    ),
     texture_streaming: Option<Res<crate::celestial::DynamicTextureStreamingConfig>>,
     ram_cache: Option<Res<crate::celestial::PlanetTextureRamCache>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -2345,10 +2385,10 @@ pub fn update_settings_overlay_system(
 
     let time_str = if pause.0 {
         "PAUSED [F1 to resume]".to_string()
-    } else if (config.time_scale - 1.0).abs() < 0.01 {
+    } else if (config.time_scale - 1.0).abs() < 0.001 {
         "1.00× [REAL-TIME] (F6/F7)".to_string()
     } else {
-        format!("{:.2}× [TIME-WARP] (F6/F7/F8)", config.time_scale)
+        format!("{} [TIME-WARP] (F6/F7/F8)", format_time_scale(config.time_scale))
     };
 
     let (gpu_str, tex_str) = if let Some(tex_cfg) = texture_quality {
@@ -2441,6 +2481,7 @@ pub fn update_settings_overlay_system(
              ROTATIONAL SAS:       {}\n\
              AUTOPILOT HOMING:     {}\n\
              NAVIGATION LOCK:      {}\n\
+             BOW FLOODLIGHTS:      {}\n\
              HUD DISPLAY MODE:     {}\n\
              AUDIO SOUNDTRACK:     {}\n\
              DISPLAY REFRESH:      {}",
@@ -2468,6 +2509,7 @@ pub fn update_settings_overlay_system(
             if shuttle.flight_assist { "ACTIVE [DAMPED] (W)" } else { "INERTIAL [TUMBLING] (W)" },
             if shuttle.align_to_target { "ACTIVE CONTINUOUS (F)" } else { "STANDBY (F)" },
             target_name,
+            format!("{} (B)", flashlight_state.as_ref().map_or("OFF", |f| f.mode.label())),
             format!("{} (I / Shift+I)", hud_state.as_ref().map_or("FULL", |h| h.mode.label())),
             audio_str,
             vsync_str,
@@ -2584,6 +2626,18 @@ fn format_number_with_commas_3(n: f64) -> String {
         result.push(c);
     }
     format!("{}.{}", result, fract_str)
+}
+
+fn format_time_scale(scale: f64) -> String {
+    if scale < 0.01 {
+        format!("{:.3}×", scale)
+    } else if scale < 1.0 {
+        format!("{:.2}×", scale)
+    } else if (scale - scale.round()).abs() < 1e-4 {
+        format!("{:.1}×", scale)
+    } else {
+        format!("{:.2}×", scale)
+    }
 }
 
 fn format_timestamp(seconds: f64) -> String {

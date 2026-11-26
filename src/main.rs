@@ -48,13 +48,15 @@ use stars::{
 use ui::{
     canopy_visor_ui_system, crosshair_hover_system, fade_startup_credits_toast_system,
     hud_display_input_system, hud_display_update_system, setup_loading_screen, setup_ui,
-    settings_overlay_input_system, target_rolling_button_system, universe_switch_button_system,
-    update_loading_screen_system, update_relativistic_gauges_system, update_settings_overlay_system,
-    update_ui_system, HudDisplayState, SettingsOverlayState, StartupLoadingTracker,
+    settings_overlay_input_system, ship_flashlight_ui_system, target_rolling_button_system,
+    universe_switch_button_system, update_loading_screen_system, update_relativistic_gauges_system,
+    update_settings_overlay_system, update_ui_system, HudDisplayState, SettingsOverlayState,
+    StartupLoadingTracker,
 };
 use world::{
     canopy_visor_glass_system, configure_ship_materials_system, pulse_beacons_system,
-    pulse_runway_lights_system, rotate_landmarks_system, spawn_world, sun_light_tracking_system,
+    pulse_runway_lights_system, rotate_landmarks_system, ship_flashlight_input_system,
+    ship_flashlight_update_system, spawn_world, sun_light_tracking_system, ShipFlashlightState,
 };
 
 fn main() {
@@ -115,6 +117,8 @@ fn main() {
         .insert_resource(SettingsOverlayState::default())
         // Active HUD display mode (Full / Minimal / Hidden)
         .insert_resource(HudDisplayState::default())
+        // Bow floodlights / searchlights state (Off / Flood / HighBeam)
+        .insert_resource(ShipFlashlightState::default())
         // Audio and music settings (master volume and mute state)
         .insert_resource(AudioSettings::default())
         // Dynamic GPU adapter texture quality scaling & resolution cap
@@ -151,14 +155,12 @@ fn main() {
                 texture_quality_input_system,
                 planet_distance_texture_streaming_system,
                 fullscreen_toggle_system,
-                pause_toggle_system,
                 vsync_toggle_system,
                 fps_tracking_system,
                 update_engine_plumes,
                 camera_toggle_system,
                 cursor_grab_system,
                 (settings_overlay_input_system, app_exit_system).chain(),
-                relativistic_config_system,
                 canopy_visor_input_system,
                 canopy_visor_camera_system,
                 canopy_visor_glass_system,
@@ -166,7 +168,15 @@ fn main() {
                 universe_switch_button_system,
             ),
         )
-        .add_systems(Update, hud_display_input_system)
+        .add_systems(
+            Update,
+            (
+                hud_display_input_system,
+                ship_flashlight_input_system,
+                ship_flashlight_update_system,
+                ship_flashlight_ui_system,
+            ),
+        )
         // World animation, celestial dynamics, synchronized physics pipeline & UI updates
         .add_systems(
             Update,
@@ -182,8 +192,10 @@ fn main() {
                 update_settings_overlay_system,
                 fade_startup_credits_toast_system,
                 audio_mute_toggle_system,
-                // Synchronized celestial axial rotation & orbital motion -> shuttle physics & collision -> targeting -> UI display:
+                // Synchronized pause & time-scale input -> simulation clock -> celestial rotation & orbits -> shuttle physics -> targeting -> UI:
                 (
+                    pause_toggle_system,
+                    relativistic_config_system,
                     shuttle_time_system,
                     axial_rotation_system,
                     planet_orbit_system,

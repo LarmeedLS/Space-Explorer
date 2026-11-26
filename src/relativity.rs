@@ -171,6 +171,28 @@ impl RelativisticState {
 }
 
 /// System to toggle speed of light presets or continuously adjust c while holding O/P.
+/// Single canonical list of simulation time-scale presets (F6 / '[' slows down, F7 / ']' speeds up, F8 / '\' resets to 1.0x)
+pub const TIME_SCALE_PRESETS: &[f64] = &[0.005, 0.01, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0, 3.0, 5.0];
+
+/// Returns the next slower time scale preset below `current` (clamped to the minimum preset)
+pub fn step_time_scale_down(current: f64) -> f64 {
+    TIME_SCALE_PRESETS
+        .iter()
+        .rev()
+        .copied()
+        .find(|&s| s < current * 0.99)
+        .unwrap_or(*TIME_SCALE_PRESETS.first().unwrap_or(&0.005))
+}
+
+/// Returns the next faster time scale preset above `current` (clamped to the maximum preset)
+pub fn step_time_scale_up(current: f64) -> f64 {
+    TIME_SCALE_PRESETS
+        .iter()
+        .copied()
+        .find(|&s| s > current * 1.01)
+        .unwrap_or(*TIME_SCALE_PRESETS.last().unwrap_or(&5.0))
+}
+
 pub fn relativistic_config_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -228,27 +250,15 @@ pub fn relativistic_config_system(
         config_changed = true;
     }
 
-    // TIME SCALE / BULLET-TIME CONTROLS:
-    // F6 or [ / BracketLeft: Slow down simulation (1.0 -> 0.5 -> 0.25 -> 0.10 -> 0.05)
-    // F7 or ] / BracketRight: Speed up simulation (0.05 -> 0.10 -> 0.25 -> 0.5 -> 1.0 -> 2.0)
+    // TIME SCALE / BULLET-TIME CONTROLS (driven by single canonical TIME_SCALE_PRESETS):
+    // F6 or [ / BracketLeft: Slow down simulation (down to 0.005x)
+    // F7 or ] / BracketRight: Speed up simulation (up to 5.0x)
     // F8 or \ / Backslash: Reset time scale to 1.0 (realtime)
     if keyboard.just_pressed(KeyCode::F6) || keyboard.just_pressed(KeyCode::BracketLeft) {
-        let scales = [0.05, 0.10, 0.25, 0.50, 1.0, 2.0];
-        let current = config.time_scale;
-        if let Some(&new_scale) = scales.iter().rev().find(|&&s| s < current - 0.01) {
-            config.time_scale = new_scale;
-        } else {
-            config.time_scale = 0.05;
-        }
+        config.time_scale = step_time_scale_down(config.time_scale);
     }
     if keyboard.just_pressed(KeyCode::F7) || keyboard.just_pressed(KeyCode::BracketRight) {
-        let scales = [0.05, 0.10, 0.25, 0.50, 1.0, 2.0];
-        let current = config.time_scale;
-        if let Some(&new_scale) = scales.iter().find(|&&s| s > current + 0.01) {
-            config.time_scale = new_scale;
-        } else {
-            config.time_scale = 2.0;
-        }
+        config.time_scale = step_time_scale_up(config.time_scale);
     }
     if keyboard.just_pressed(KeyCode::F8) || keyboard.just_pressed(KeyCode::Backslash) {
         config.time_scale = 1.0;
@@ -1417,5 +1427,26 @@ mod tests {
         let v = c * rapidity.length().tanh();
         assert!(v < c, "Coordinate velocity must NEVER reach or exceed c (got {} vs c = {})", v, c);
         assert!(v > c * 0.9999, "Velocity should approach c asymptotically");
+    }
+
+    #[test]
+    fn test_time_scale_presets_stepping() {
+        // Verify presets are strictly ascending
+        for pair in TIME_SCALE_PRESETS.windows(2) {
+            assert!(pair[0] < pair[1], "TIME_SCALE_PRESETS must be strictly ascending");
+        }
+
+        // Stepping down from 1.0 reaches 0.005 cleanly (including 0.01 -> 0.005)
+        let mut s = 1.0;
+        for &expected in &[0.50, 0.25, 0.10, 0.05, 0.01, 0.005, 0.005] {
+            s = step_time_scale_down(s);
+            assert!((s - expected).abs() < 1e-9, "Expected {}, got {}", expected, s);
+        }
+
+        // Stepping up from 0.005 reaches 5.0 cleanly
+        for &expected in &[0.01, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0, 3.0, 5.0, 5.0] {
+            s = step_time_scale_up(s);
+            assert!((s - expected).abs() < 1e-9, "Expected {}, got {}", expected, s);
+        }
     }
 }
